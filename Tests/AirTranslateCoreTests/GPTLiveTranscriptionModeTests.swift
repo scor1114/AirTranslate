@@ -102,6 +102,25 @@ struct GPTLiveTranscriptionModeTests {
     }
 
     @Test
+    func translationSessionUsesSupportedTranslationContract() throws {
+        let data = try OpenAIRealtimeTranscriber.translationSessionUpdateData(language: .korean)
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let session = try #require(object["session"] as? [String: Any])
+        let audio = try #require(session["audio"] as? [String: Any])
+        let input = try #require(audio["input"] as? [String: Any])
+        let output = try #require(audio["output"] as? [String: Any])
+        let transcription = try #require(input["transcription"] as? [String: Any])
+        let noiseReduction = try #require(input["noise_reduction"] as? [String: Any])
+
+        #expect(object["type"] as? String == "session.update")
+        #expect(transcription["model"] as? String == "gpt-realtime-whisper")
+        #expect(noiseReduction["type"] as? String == "near_field")
+        #expect(output["language"] as? String == "ko")
+        #expect(input["format"] == nil)
+        #expect(input["turn_detection"] == nil)
+    }
+
+    @Test
     func interleavedTranscriptionItemsKeepIndependentBuffers() {
         let transcriber = OpenAIRealtimeTranscriber()
         let recorder = GPTLiveTranscriptionRecorder()

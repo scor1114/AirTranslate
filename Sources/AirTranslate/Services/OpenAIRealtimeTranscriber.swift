@@ -455,24 +455,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         case .transcription:
             data = try Self.transcriptionSessionUpdateData(language: language, modelID: modelID)
         case .translationOnly:
-            let event = OpenAIRealtimeTranslationSessionUpdateEvent(
-                session: OpenAIRealtimeTranslationSession(
-                    audio: OpenAIRealtimeTranslationAudio(
-                        input: OpenAIRealtimeTranslationAudioInput(
-                            format: OpenAIRealtimeAudioFormat(type: "audio/pcm", rate: Self.realtimeAudioSampleRate),
-                            transcription: OpenAIRealtimeTranslationInputTranscription(
-                                model: OpenAIRealtimeTranscriptionModel.gptRealtimeWhisper.rawValue
-                            ),
-                            turnDetection: .lowLatencyServerVAD,
-                            noiseReduction: OpenAIRealtimeNoiseReduction(type: "near_field")
-                        ),
-                        output: OpenAIRealtimeTranslationAudioOutput(
-                            language: language.openAILanguageCode
-                        )
-                    )
-                )
-            )
-            data = try JSONEncoder().encode(event)
+            data = try Self.translationSessionUpdateData(language: language)
         }
         guard let text = String(data: data, encoding: .utf8) else { return }
         try await send(
@@ -496,6 +479,25 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                         ),
                         turnDetection: .lowLatencyServerVAD,
                         noiseReduction: OpenAIRealtimeNoiseReduction(type: "near_field")
+                    )
+                )
+            )
+        )
+        return try JSONEncoder().encode(event)
+    }
+
+    static func translationSessionUpdateData(language: LanguageOption) throws -> Data {
+        let event = OpenAIRealtimeTranslationSessionUpdateEvent(
+            session: OpenAIRealtimeTranslationSession(
+                audio: OpenAIRealtimeTranslationAudio(
+                    input: OpenAIRealtimeTranslationAudioInput(
+                        transcription: OpenAIRealtimeTranslationInputTranscription(
+                            model: OpenAIRealtimeTranscriptionModel.gptRealtimeWhisper.rawValue
+                        ),
+                        noiseReduction: OpenAIRealtimeNoiseReduction(type: "near_field")
+                    ),
+                    output: OpenAIRealtimeTranslationAudioOutput(
+                        language: language.openAILanguageCode
                     )
                 )
             )
@@ -1633,15 +1635,11 @@ private struct OpenAIRealtimeTranslationAudio: Encodable {
 }
 
 private struct OpenAIRealtimeTranslationAudioInput: Encodable {
-    let format: OpenAIRealtimeAudioFormat
     let transcription: OpenAIRealtimeTranslationInputTranscription
-    let turnDetection: OpenAIRealtimeTurnDetection
     let noiseReduction: OpenAIRealtimeNoiseReduction
 
     private enum CodingKeys: String, CodingKey {
-        case format
         case transcription
-        case turnDetection = "turn_detection"
         case noiseReduction = "noise_reduction"
     }
 }
