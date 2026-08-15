@@ -81,13 +81,12 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     func transcriptionSessionUsesCanonicalLiveTranscriptionContract() throws {
-        let url = OpenAIRealtimeTranscriber.transcriptionWebSocketURL(
-            modelID: OpenAIRealtimeTranscriptionModel.gptLiveTranscribe.rawValue
-        )
+        let url = OpenAIRealtimeTranscriber.transcriptionWebSocketURL
         let queryItems = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
         let data = try OpenAIRealtimeTranscriber.transcriptionSessionUpdateData(
             language: .korean,
-            modelID: OpenAIRealtimeTranscriptionModel.gptLiveTranscribe.rawValue
+            modelID: OpenAIRealtimeTranscriptionModel.gptLiveTranscribe.rawValue,
+            audioInputSource: .systemAudio
         )
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let session = try #require(object["session"] as? [String: Any])
@@ -95,8 +94,10 @@ struct GPTLiveTranscriptionModeTests {
         let input = try #require(audio["input"] as? [String: Any])
         let format = try #require(input["format"] as? [String: Any])
         let transcription = try #require(input["transcription"] as? [String: Any])
+        let commitData = try OpenAIRealtimeTranscriber.transcriptionAudioCommitData()
+        let commit = try #require(JSONSerialization.jsonObject(with: commitData) as? [String: Any])
 
-        #expect(queryItems.contains(URLQueryItem(name: "model", value: "gpt-live-transcribe")))
+        #expect(!queryItems.contains(where: { $0.name == "model" }))
         #expect(queryItems.contains(URLQueryItem(name: "intent", value: "transcription")))
         #expect(session["type"] as? String == "transcription")
         #expect(format["type"] as? String == "audio/pcm")
@@ -104,7 +105,50 @@ struct GPTLiveTranscriptionModeTests {
         #expect(transcription["model"] as? String == "gpt-live-transcribe")
         #expect(transcription["languages"] as? [String] == ["ko"])
         #expect(transcription["language"] == nil)
-        #expect(transcription["delay"] as? String == "low")
+        #expect(transcription["delay"] as? String == "high")
+        #expect(input["turn_detection"] is NSNull)
+        #expect(input["noise_reduction"] is NSNull)
+        #expect(commit["type"] as? String == "input_audio_buffer.commit")
+    }
+
+    @Test
+    func microphoneTranscriptionUsesFarFieldNoiseReduction() throws {
+        let data = try OpenAIRealtimeTranscriber.transcriptionSessionUpdateData(
+            language: .korean,
+            modelID: OpenAIRealtimeTranscriptionModel.gptLiveTranscribe.rawValue,
+            audioInputSource: .microphone
+        )
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let session = try #require(object["session"] as? [String: Any])
+        let audio = try #require(session["audio"] as? [String: Any])
+        let input = try #require(audio["input"] as? [String: Any])
+        let noiseReduction = try #require(input["noise_reduction"] as? [String: Any])
+
+        #expect(noiseReduction["type"] as? String == "far_field")
+    }
+
+    @Test
+    func realtimeTranscriptionCommitsAfterSilenceOrMaximumTurnDuration() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        var boundary = RealtimeTranscriptionTurnBoundary()
+
+        let initialSilence = boundary.observe(level: -120, now: startedAt)
+        let speechStarted = boundary.observe(level: -20, now: startedAt)
+        let silenceStarted = boundary.observe(level: -120, now: startedAt.addingTimeInterval(1))
+        let shortSilence = boundary.observe(level: -120, now: startedAt.addingTimeInterval(1.59))
+        let silenceCommit = boundary.observe(level: -120, now: startedAt.addingTimeInterval(1.6))
+        let nextSpeechStarted = boundary.observe(level: -20, now: startedAt.addingTimeInterval(2))
+        let beforeMaximumDuration = boundary.observe(level: -20, now: startedAt.addingTimeInterval(21.9))
+        let maximumDurationCommit = boundary.observe(level: -20, now: startedAt.addingTimeInterval(22))
+
+        #expect(!initialSilence)
+        #expect(!speechStarted)
+        #expect(!silenceStarted)
+        #expect(!shortSilence)
+        #expect(silenceCommit)
+        #expect(!nextSpeechStarted)
+        #expect(!beforeMaximumDuration)
+        #expect(maximumDurationCommit)
     }
 
     @Test

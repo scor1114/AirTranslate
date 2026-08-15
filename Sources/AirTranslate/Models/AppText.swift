@@ -563,12 +563,12 @@ enum AppText {
         korean: "모두 지우기"
     )
     static let deleteAllSavedTranscriptsConfirmation = localized(
-        english: "Delete all saved transcript files? This cannot be undone.",
-        korean: "저장된 기록 파일을 모두 지울까요? 이 작업은 되돌릴 수 없습니다."
+        english: "Delete all saved transcript and audio recording files? This cannot be undone.",
+        korean: "저장된 기록과 녹음 파일을 모두 지울까요? 이 작업은 되돌릴 수 없습니다."
     )
     static let deleteAllSavedTranscriptsHelp = localized(
-        english: "Delete every saved transcript file.",
-        korean: "저장된 모든 기록 파일을 삭제합니다."
+        english: "Delete every saved transcript and audio recording file.",
+        korean: "저장된 모든 기록과 녹음 파일을 삭제합니다."
     )
     static let editSaved = localized(english: "Edit Saved", korean: "저장본 편집")
     static let title = localized(english: "Title", korean: "제목")
@@ -580,10 +580,10 @@ enum AppText {
     static let transcriptText = localized(english: "Transcript Text", korean: "기록 텍스트")
     static let deleteSavedTranscript = localized(english: "Delete Transcript", korean: "기록 삭제")
     static let deleteSavedTranscriptConfirmation = localized(
-        english: "Delete this saved transcript? This cannot be undone.",
-        korean: "이 저장 기록을 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
-        japanese: "この保存済み文字起こしを削除しますか？この操作は取り消せません。",
-        chineseSimplified: "要删除这份已保存的转写记录吗？此操作无法撤销。"
+        english: "Delete this saved transcript and its audio recording? This cannot be undone.",
+        korean: "이 저장 기록과 녹음 파일을 함께 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
+        japanese: "この保存済み文字起こしと音声録音を削除しますか？この操作は取り消せません。",
+        chineseSimplified: "要删除这份已保存的转写记录及其录音吗？此操作无法撤销。"
     )
     static let translation = localized(english: "Translation", korean: "번역")
     static let translationDescription = localized(

@@ -96,6 +96,44 @@ struct StartConfiguration: Equatable {
     }
 }
 
+struct RealtimeTranscriptionTurnBoundary {
+    private static let silenceThreshold: Float = -50
+    private static let requiredSilenceDuration: TimeInterval = 0.6
+    private static let maximumDuration: TimeInterval = 20
+    private var startedAt: Date?
+    private var silenceStartedAt: Date?
+
+    mutating func observe(level: Float?, now: Date = Date()) -> Bool {
+        guard let level else { return false }
+        if level >= Self.silenceThreshold {
+            silenceStartedAt = nil
+            if startedAt == nil {
+                startedAt = now
+            }
+            guard let startedAt,
+                  now.timeIntervalSince(startedAt) >= Self.maximumDuration
+            else { return false }
+        } else {
+            guard startedAt != nil else { return false }
+            guard let silenceStartedAt else {
+                self.silenceStartedAt = now
+                return false
+            }
+            guard now.timeIntervalSince(silenceStartedAt) >= Self.requiredSilenceDuration else {
+                return false
+            }
+        }
+
+        reset()
+        return true
+    }
+
+    mutating func reset() {
+        startedAt = nil
+        silenceStartedAt = nil
+    }
+}
+
 enum PipelineLifecyclePhase: Equatable {
     case stopped
     case starting
@@ -241,12 +279,13 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         lock.unlock()
     }
 
-    func clear() {
+    @discardableResult
+    func clear() -> URL? {
         lock.lock()
         let recordingWriter = pipeline?.recordingWriter
         pipeline = nil
         lock.unlock()
-        recordingWriter?.finish()
+        return recordingWriter?.finish()
     }
 
     func setRecordingPaused(_ isPaused: Bool) {
@@ -512,6 +551,7 @@ final class TranslationSessionStore {
     var pendingAutoDetectionLanguageChange: AutoDetectionLanguageChangeConfirmation?
     var isFoundationTranscriptCleanupRunning = false
     private(set) var latestAudioLevel: Float?
+    private var realtimeTranscriptionTurnBoundary = RealtimeTranscriptionTurnBoundary()
     var modelAvailabilityByModelID = Dictionary(
         uniqueKeysWithValues: IntelligenceModel.allCases.map {
             ($0.id, ModelAvailability.checking(for: $0))
@@ -587,6 +627,7 @@ final class TranslationSessionStore {
     private var activeAutosaveSourceText = ""
     private var activeAutosaveTranslatedText = ""
     private var activeAutosaveBaseFileName: String?
+    private var activeRecordingTranscriptBaseFileName: String?
     private var transcriptCheckpointTask: Task<Void, Never>?
     private let transcriptCheckpointInterval: TimeInterval
     private var isRestoringSelectedSettings = false
@@ -601,6 +642,7 @@ final class TranslationSessionStore {
     private var permissionSuspendedStartContinuations: [UInt64: CheckedContinuation<Void, Never>] = [:]
 #endif
     private var captureStopTask: Task<Void, Never>?
+    private var gptTranscriptionStopTask: Task<Void, Never>?
     private var pipelineLifecycle = PipelineLifecycleState()
     private var activeCaptionerGeneration: UInt64?
     private var dubbingSpeechProgress = DubbingSpeechProgress()
@@ -747,6 +789,7 @@ final class TranslationSessionStore {
         }
 
         invalidateCaptureStartAttempt()
+        activeRecordingTranscriptBaseFileName = nil
         let configuration = currentStartConfiguration()
         let generation = pipelineLifecycle.beginStart(configuration: configuration)
         activeCaptureStartGeneration = generation
@@ -855,10 +898,27 @@ final class TranslationSessionStore {
     func stop() {
         guard isRunning || isStarting else { return }
         pipelineLifecycle.stop()
+        if isRunning, isUsingGPTTranscriptionMode {
+            guard gptTranscriptionStopTask == nil else { return }
+            audioSamplePipelineRegistry.setRecordingPaused(true)
+            let transcriberToFinish = openAITranscriber
+            gptTranscriptionStopTask = Task { @MainActor [weak self] in
+                _ = await transcriberToFinish.finishPendingTranscriptionAudio()
+                guard let self,
+                      self.gptTranscriptionStopTask != nil,
+                      self.openAITranscriber === transcriberToFinish
+                else { return }
+                self.gptTranscriptionStopTask = nil
+                self.finishPipeline(statusOverride: nil)
+            }
+            return
+        }
         finishPipeline(statusOverride: nil)
     }
 
     private func finishPipeline(statusOverride: String?) {
+        gptTranscriptionStopTask?.cancel()
+        gptTranscriptionStopTask = nil
         invalidateCaptureStartAttempt()
         cancelTranslationSessionWarmup()
         autoStartAfterModelAssetDownloadTask?.cancel()
@@ -871,7 +931,8 @@ final class TranslationSessionStore {
         flushPendingCaptionPresentation()
         let hadTranscriptToSave = !visibleTranscript().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !activeAutosaveSourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let didSaveTranscript = flushPendingTranscriptSave()
+        let savedTranscriptBaseFileName = flushPendingTranscriptSave()
+        let didSaveTranscript = savedTranscriptBaseFileName != nil
         resetLiveSessionState(clearsVisibleLines: false)
         isPaused = false
         setCaptionersPaused(false)
@@ -884,7 +945,12 @@ final class TranslationSessionStore {
         } else if !hadTranscriptToSave {
             statusMessage = AppText.stopped
         }
-        stopCaptioners(openAITranscriberAlreadyStopped: true)
+        let recordingURL = stopCaptioners(openAITranscriberAlreadyStopped: true)
+        associateRecording(
+            recordingURL,
+            withTranscriptBaseFileName: activeRecordingTranscriptBaseFileName ?? savedTranscriptBaseFileName
+        )
+        activeRecordingTranscriptBaseFileName = nil
         if didSaveTranscript {
             showToast(AppText.transcriptSavedToast)
         }
@@ -1081,8 +1147,12 @@ final class TranslationSessionStore {
     }
 
     func pause() {
-        guard isRunning, !isPaused else { return }
+        guard isRunning, !isPaused, gptTranscriptionStopTask == nil else { return }
 
+        if isUsingGPTTranscriptionMode {
+            openAITranscriber.commitTranscriptionAudio()
+            realtimeTranscriptionTurnBoundary.reset()
+        }
         flushPendingRecognizedCaption()
         flushPendingCaptionPresentation()
         transcriptCleanupTask?.cancel()
@@ -1113,7 +1183,7 @@ final class TranslationSessionStore {
         let detectedLanguage = pendingAutoDetectionLanguageChange.detectedLanguage
         let bufferedSourceText = pendingAutoDetectionLanguageChange.sourceText
         let bufferedConfidence = pendingAutoDetectionLanguageChange.confidence
-        let didSaveTranscript = flushPendingTranscriptSave()
+        let didSaveTranscript = flushPendingTranscriptSave() != nil
 
         resetLiveSessionState(clearsVisibleLines: true)
         appleAutoDetectionPreferredLanguage = detectedLanguage
@@ -1158,8 +1228,13 @@ final class TranslationSessionStore {
         transcriptCheckpointTask = nil
         flushPendingRecognizedCaption()
         flushPendingCaptionPresentation()
-        _ = flushPendingTranscriptSave()
-        audioSamplePipelineRegistry.clear()
+        let savedTranscriptBaseFileName = flushPendingTranscriptSave()
+        let recordingURL = audioSamplePipelineRegistry.clear()
+        associateRecording(
+            recordingURL,
+            withTranscriptBaseFileName: activeRecordingTranscriptBaseFileName ?? savedTranscriptBaseFileName
+        )
+        activeRecordingTranscriptBaseFileName = nil
     }
 
     func openPrivacySettings() {
@@ -1748,6 +1823,7 @@ final class TranslationSessionStore {
         if let translationFileName = selectedTranscript.translationFileName {
             try? FileManager.default.removeItem(at: transcriptURL(fileName: translationFileName))
         }
+        try? FileManager.default.removeItem(at: associatedRecordingURL(for: selectedTranscript))
         self.selectedSavedTranscriptID = nil
         savedDraftSourceText = ""
         savedDraftTranslationText = ""
@@ -1764,7 +1840,7 @@ final class TranslationSessionStore {
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             )
-            for fileURL in fileURLs where fileURL.pathExtension == "txt" {
+            for fileURL in fileURLs where ["txt", "m4a"].contains(fileURL.pathExtension.lowercased()) {
                 try FileManager.default.removeItem(at: fileURL)
             }
             savedTranscripts.removeAll()
@@ -1832,7 +1908,8 @@ final class TranslationSessionStore {
         if configuration.isTranscribeOnlyMode, configuration.openAITranscriptionModel.isEnabled {
             try await openAITranscriber.start(
                 language: configuration.sourceLanguage,
-                model: configuration.openAITranscriptionModel
+                model: configuration.openAITranscriptionModel,
+                audioInputSource: configuration.audioInputSource
             )
         } else if configuration.geminiTranslationModel.isEnabled {
             try await geminiLiveTranslator.start(
@@ -1847,7 +1924,8 @@ final class TranslationSessionStore {
         } else if configuration.openAITranscriptionModel.isEnabled {
             try await openAITranscriber.start(
                 language: configuration.sourceLanguage,
-                model: configuration.openAITranscriptionModel
+                model: configuration.openAITranscriptionModel,
+                audioInputSource: configuration.audioInputSource
             )
         }
     }
@@ -1916,8 +1994,9 @@ final class TranslationSessionStore {
         )
     }
 
-    private func stopCaptioners(openAITranscriberAlreadyStopped: Bool = false) {
-        audioSamplePipelineRegistry.clear()
+    @discardableResult
+    private func stopCaptioners(openAITranscriberAlreadyStopped: Bool = false) -> URL? {
+        let recordingURL = audioSamplePipelineRegistry.clear()
         activeCaptionerGeneration = nil
         openAITranscriber.onAudioTransportDegraded = nil
         geminiLiveTranslator.onAudioTransportDegraded = nil
@@ -1929,6 +2008,7 @@ final class TranslationSessionStore {
             openAITranscriber.stop()
         }
         geminiLiveTranslator.stop()
+        return recordingURL
     }
 
     private func flushOpenAITerminalTranscriptMailbox() {
@@ -1976,6 +2056,7 @@ final class TranslationSessionStore {
     private func resetLiveSessionState(clearsVisibleLines: Bool) {
         audioSampleCount = 0
         latestAudioLevel = nil
+        realtimeTranscriptionTurnBoundary.reset()
         lastRecognizedText = ""
         lastRecognizedWasFinal = false
         currentLineID = nil
@@ -2422,11 +2503,11 @@ final class TranslationSessionStore {
 
     @discardableResult
     private func checkpointPendingTranscriptSave() -> Bool {
-        persistPendingTranscriptSave(clearsStagedText: false, reloadsLibrary: false)
+        persistPendingTranscriptSave(clearsStagedText: false, reloadsLibrary: false) != nil
     }
 
     @discardableResult
-    private func flushPendingTranscriptSave() -> Bool {
+    private func flushPendingTranscriptSave() -> String? {
         persistPendingTranscriptSave(clearsStagedText: true, reloadsLibrary: true)
     }
 
@@ -2434,14 +2515,14 @@ final class TranslationSessionStore {
     private func persistPendingTranscriptSave(
         clearsStagedText: Bool,
         reloadsLibrary: Bool
-    ) -> Bool {
+    ) -> String? {
         let currentSourceText = visibleTranscript().trimmingCharacters(in: .whitespacesAndNewlines)
         if !currentSourceText.isEmpty {
             activeAutosaveSourceText = currentSourceText
         }
 
         let sourceText = activeAutosaveSourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sourceText.isEmpty else { return false }
+        guard !sourceText.isEmpty else { return nil }
 
         let updatedAt = Date()
         let baseFileName = activeAutosaveBaseFileName
@@ -2455,9 +2536,10 @@ final class TranslationSessionStore {
 
         for savedFile in savedFiles {
             guard writeTranscriptText(savedFile.text, fileName: savedFile.fileName) else {
-                return false
+                return nil
             }
         }
+        activeRecordingTranscriptBaseFileName = activeRecordingTranscriptBaseFileName ?? baseFileName
 
         if clearsStagedText {
             activeAutosaveSourceText = ""
@@ -2467,7 +2549,7 @@ final class TranslationSessionStore {
         if reloadsLibrary {
             loadSavedTranscripts()
         }
-        return true
+        return baseFileName
     }
 
     private func savedTranscriptFiles(
@@ -2550,6 +2632,32 @@ final class TranslationSessionStore {
         transcriptsDirectoryURL.appendingPathComponent(fileName)
     }
 
+    private func associatedRecordingURL(for transcript: SavedTranscript) -> URL {
+        let baseFileName = transcriptVariantInfo(transcript.sourceFileName)?.baseFileName
+            ?? transcript.sourceFileName
+        return transcriptURL(fileName: recordingFileName(forTranscriptBaseFileName: baseFileName))
+    }
+
+    private func recordingFileName(forTranscriptBaseFileName fileName: String) -> String {
+        let stem = fileName.hasSuffix(".txt") ? String(fileName.dropLast(4)) : fileName
+        return "\(stem).m4a"
+    }
+
+    private func associateRecording(_ recordingURL: URL?, withTranscriptBaseFileName fileName: String?) {
+        guard let recordingURL, let fileName else { return }
+
+        let destinationURL = transcriptURL(
+            fileName: recordingFileName(forTranscriptBaseFileName: fileName)
+        )
+        guard recordingURL.standardizedFileURL != destinationURL.standardizedFileURL else { return }
+
+        do {
+            try FileManager.default.moveItem(at: recordingURL, to: destinationURL)
+        } catch {
+            statusMessage = AppText.audioRecordingFailed(error.localizedDescription)
+        }
+    }
+
     private func transcriptVariantFileName(_ fileName: String, suffix: String) -> String {
         let stem = fileName.hasSuffix(".txt") ? String(fileName.dropLast(4)) : fileName
         return "\(stem)_\(suffix).txt"
@@ -2599,7 +2707,8 @@ final class TranslationSessionStore {
             transcriptVariantFileName(fileName, suffix: "original"),
             transcriptVariantFileName(fileName, suffix: "translation"),
             legacyTranscriptVariantFileName(fileName, suffix: "original"),
-            legacyTranscriptVariantFileName(fileName, suffix: "translation")
+            legacyTranscriptVariantFileName(fileName, suffix: "translation"),
+            recordingFileName(forTranscriptBaseFileName: fileName)
         ]
         return fileNames.contains { FileManager.default.fileExists(atPath: transcriptURL(fileName: $0).path) }
     }
@@ -2633,7 +2742,7 @@ final class TranslationSessionStore {
         confidence: Double,
         isFinal: Bool
     ) {
-        guard isRunning, !isPaused else { return }
+        guard isRunning, !isPaused || isUsingGPTTranscriptionMode else { return }
         guard sourceText != lastRecognizedText || isFinal != lastRecognizedWasFinal else { return }
 
         let now = Date()
@@ -4550,6 +4659,7 @@ extension TranslationSessionStore: SystemAudioCaptureDelegate {
             if isRunning, lines.isEmpty {
                 statusMessage = audioStatusMessage(sampleCount: count, level: level)
             }
+            commitRealtimeTranscriptionAtTurnBoundary(level: level)
             if let level, level < -50 {
                 scheduleTranscriptCleanup()
             }
@@ -4597,6 +4707,14 @@ extension TranslationSessionStore: SystemAudioCaptureDelegate {
             source: audioInputSource
         )
     }
+
+    private func commitRealtimeTranscriptionAtTurnBoundary(level: Float?) {
+        guard isRunning,
+              isUsingGPTTranscriptionMode,
+              realtimeTranscriptionTurnBoundary.observe(level: level)
+        else { return }
+        openAITranscriber.commitTranscriptionAudio()
+    }
 }
 
 extension TranslationSessionStore: MicrophoneAudioCaptureDelegate {
@@ -4629,6 +4747,7 @@ extension TranslationSessionStore: MicrophoneAudioCaptureDelegate {
             if isRunning, lines.isEmpty {
                 statusMessage = audioStatusMessage(sampleCount: count, level: level)
             }
+            commitRealtimeTranscriptionAtTurnBoundary(level: level)
             if let level, level < -50 {
                 scheduleTranscriptCleanup()
             }

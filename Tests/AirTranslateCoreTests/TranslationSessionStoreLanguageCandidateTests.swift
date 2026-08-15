@@ -192,6 +192,61 @@ struct TranslationSessionStoreLanguageCandidateTests {
 
     @Test
     @MainActor
+    func deletingSavedTranscriptAlsoDeletesItsRecording() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateDeleteTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let baseName = "2026-08-15_13-00_Meeting"
+        let sourceURL = directory.appendingPathComponent("\(baseName)_original.txt")
+        let translationURL = directory.appendingPathComponent("\(baseName)_translation.txt")
+        let recordingURL = directory.appendingPathComponent("\(baseName).m4a")
+        try "Meeting transcript".write(to: sourceURL, atomically: true, encoding: .utf8)
+        try "회의 기록".write(to: translationURL, atomically: true, encoding: .utf8)
+        try Data([0]).write(to: recordingURL)
+
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory
+        )
+        let transcript = try #require(session.savedTranscripts.first)
+        session.selectSavedTranscript(transcript.id)
+        session.deleteSelectedTranscript()
+
+        #expect(!FileManager.default.fileExists(atPath: sourceURL.path))
+        #expect(!FileManager.default.fileExists(atPath: translationURL.path))
+        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+    }
+
+    @Test
+    @MainActor
+    func deletingAllSavedTranscriptsAlsoDeletesOrphanedRecordings() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateDeleteAllTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let transcriptURL = directory.appendingPathComponent("Meeting.txt")
+        let recordingURL = directory.appendingPathComponent("legacy-recording.m4a")
+        let unrelatedURL = directory.appendingPathComponent("keep.json")
+        try "Meeting transcript".write(to: transcriptURL, atomically: true, encoding: .utf8)
+        try Data([0]).write(to: recordingURL)
+        try Data([0]).write(to: unrelatedURL)
+
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory
+        )
+        session.deleteAllSavedTranscripts()
+
+        #expect(!FileManager.default.fileExists(atPath: transcriptURL.path))
+        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+        #expect(FileManager.default.fileExists(atPath: unrelatedURL.path))
+    }
+
+    @Test
+    @MainActor
     func transcribeOnlyModeHidesTranslationPane() {
         let session = TranslationSessionStore()
 
