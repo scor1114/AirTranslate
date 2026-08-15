@@ -81,6 +81,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     func transcriptionSessionUsesCanonicalLiveTranscriptionContract() throws {
+        let url = OpenAIRealtimeTranscriber.transcriptionWebSocketURL(
+            modelID: OpenAIRealtimeTranscriptionModel.gptLiveTranscribe.rawValue
+        )
+        let queryItems = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
         let data = try OpenAIRealtimeTranscriber.transcriptionSessionUpdateData(
             language: .korean,
             modelID: OpenAIRealtimeTranscriptionModel.gptLiveTranscribe.rawValue
@@ -92,6 +96,8 @@ struct GPTLiveTranscriptionModeTests {
         let format = try #require(input["format"] as? [String: Any])
         let transcription = try #require(input["transcription"] as? [String: Any])
 
+        #expect(queryItems.contains(URLQueryItem(name: "model", value: "gpt-live-transcribe")))
+        #expect(queryItems.contains(URLQueryItem(name: "intent", value: "transcription")))
         #expect(session["type"] as? String == "transcription")
         #expect(format["type"] as? String == "audio/pcm")
         #expect(format["rate"] as? Int == 24_000)

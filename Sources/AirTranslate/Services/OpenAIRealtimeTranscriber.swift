@@ -209,7 +209,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         let url: URL
         switch outputMode {
         case .transcription:
-            url = URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!
+            url = Self.transcriptionWebSocketURL(modelID: modelID)
         case .translationOnly:
             url = URL(string: "wss://api.openai.com/v1/realtime/translations?model=\(modelID)")!
         }
@@ -484,6 +484,10 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             )
         )
         return try JSONEncoder().encode(event)
+    }
+
+    static func transcriptionWebSocketURL(modelID: String) -> URL {
+        URL(string: "wss://api.openai.com/v1/realtime?model=\(modelID)&intent=transcription")!
     }
 
     static func translationSessionUpdateData(language: LanguageOption) throws -> Data {
