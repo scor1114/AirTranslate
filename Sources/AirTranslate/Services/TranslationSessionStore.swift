@@ -44,6 +44,7 @@ private enum SettingsKey {
     static let sessionDurationMode = "sessionDurationMode"
     static let audioInputSource = "audioInputSource"
     static let selectedMicrophoneInputDeviceID = "selectedMicrophoneInputDeviceID"
+    static let isAudioRecordingEnabled = "isAudioRecordingEnabled"
     static let isAppleSourceAutoDetectionEnabled = "isAppleSourceAutoDetectionEnabled"
 }
 
@@ -213,6 +214,8 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         let transcriber: LiveSpeechTranscriber
         let openAITranscriber: OpenAIRealtimeTranscriber
         let geminiLiveTranslator: GeminiLiveTranslationService
+        let recordingWriter: AudioRecordingWriter?
+        let recordingFailure: @Sendable (Error) -> Void
     }
 
     private let lock = NSLock()
@@ -222,21 +225,33 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         generation: UInt64,
         transcriber: LiveSpeechTranscriber,
         openAITranscriber: OpenAIRealtimeTranscriber,
-        geminiLiveTranslator: GeminiLiveTranslationService
+        geminiLiveTranslator: GeminiLiveTranslationService,
+        recordingWriter: AudioRecordingWriter?,
+        recordingFailure: @escaping @Sendable (Error) -> Void
     ) {
         lock.lock()
         pipeline = Pipeline(
             generation: generation,
             transcriber: transcriber,
             openAITranscriber: openAITranscriber,
-            geminiLiveTranslator: geminiLiveTranslator
+            geminiLiveTranslator: geminiLiveTranslator,
+            recordingWriter: recordingWriter,
+            recordingFailure: recordingFailure
         )
         lock.unlock()
     }
 
     func clear() {
         lock.lock()
+        let recordingWriter = pipeline?.recordingWriter
         pipeline = nil
+        lock.unlock()
+        recordingWriter?.finish()
+    }
+
+    func setRecordingPaused(_ isPaused: Bool) {
+        lock.lock()
+        pipeline?.recordingWriter?.isPaused = isPaused
         lock.unlock()
     }
 
@@ -247,6 +262,9 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
 
         // clear() waits for any in-flight append to finish before the MainActor
         // stops or replaces these backends.
+        if let error = pipeline.recordingWriter?.append(sampleBuffer) {
+            pipeline.recordingFailure(error)
+        }
         pipeline.transcriber.append(sampleBuffer)
         pipeline.openAITranscriber.append(sampleBuffer)
         pipeline.geminiLiveTranslator.append(sampleBuffer)
@@ -476,6 +494,9 @@ final class TranslationSessionStore {
         didSet { persistSelectedSettings() }
     }
     var selectedMicrophoneInputDeviceID = MicrophoneInputDevice.systemDefaultID {
+        didSet { persistSelectedSettings() }
+    }
+    var isAudioRecordingEnabled = true {
         didSet { persistSelectedSettings() }
     }
     var microphoneInputDevices = MicrophoneDeviceCatalog.availableInputDevices()
@@ -765,7 +786,18 @@ final class TranslationSessionStore {
                     generation: generation,
                     transcriber: transcriber,
                     openAITranscriber: openAITranscriber,
-                    geminiLiveTranslator: geminiLiveTranslator
+                    geminiLiveTranslator: geminiLiveTranslator,
+                    recordingWriter: isAudioRecordingEnabled
+                        ? AudioRecordingWriter(
+                            directoryURL: transcriptsDirectoryURL,
+                            inputSource: configuration.audioInputSource
+                        )
+                        : nil,
+                    recordingFailure: { [weak self] error in
+                        Task { @MainActor [weak self] in
+                            self?.statusMessage = AppText.audioRecordingFailed(error.localizedDescription)
+                        }
+                    }
                 )
 
                 statusMessage = AppText.startingCapture(for: configuration.audioInputSource)
@@ -1127,6 +1159,7 @@ final class TranslationSessionStore {
         flushPendingRecognizedCaption()
         flushPendingCaptionPresentation()
         _ = flushPendingTranscriptSave()
+        audioSamplePipelineRegistry.clear()
     }
 
     func openPrivacySettings() {
@@ -1934,6 +1967,7 @@ final class TranslationSessionStore {
     }
 
     private func setCaptionersPaused(_ isPaused: Bool) {
+        audioSamplePipelineRegistry.setRecordingPaused(isPaused)
         transcriber.setPaused(isPaused)
         openAITranscriber.setPaused(isPaused)
         geminiLiveTranslator.setPaused(isPaused)
@@ -2186,6 +2220,9 @@ final class TranslationSessionStore {
         if let deviceID = defaults.string(forKey: SettingsKey.selectedMicrophoneInputDeviceID) {
             selectedMicrophoneInputDeviceID = deviceID
         }
+        if defaults.object(forKey: SettingsKey.isAudioRecordingEnabled) != nil {
+            isAudioRecordingEnabled = defaults.bool(forKey: SettingsKey.isAudioRecordingEnabled)
+        }
         isAppleSourceAutoDetectionEnabled = isAppleSourceAutoDetectionAvailable
             && defaults.bool(forKey: SettingsKey.isAppleSourceAutoDetectionEnabled)
         refreshMicrophoneInputDevices()
@@ -2235,6 +2272,7 @@ final class TranslationSessionStore {
         defaults.set(sessionDurationMode.id, forKey: SettingsKey.sessionDurationMode)
         defaults.set(audioInputSource.id, forKey: SettingsKey.audioInputSource)
         defaults.set(selectedMicrophoneInputDeviceID, forKey: SettingsKey.selectedMicrophoneInputDeviceID)
+        defaults.set(isAudioRecordingEnabled, forKey: SettingsKey.isAudioRecordingEnabled)
         defaults.set(isAppleSourceAutoDetectionEnabled, forKey: SettingsKey.isAppleSourceAutoDetectionEnabled)
     }
 

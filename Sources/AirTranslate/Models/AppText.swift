@@ -114,6 +114,24 @@ enum AppText {
         japanese: "オーディオ入力",
         chineseSimplified: "音频输入"
     )
+    static let audioRecording = localized(
+        english: "Recording",
+        korean: "녹음",
+        japanese: "録音",
+        chineseSimplified: "录音"
+    )
+    static let saveAudioRecording = localized(
+        english: "Save audio file",
+        korean: "녹음 파일 저장",
+        japanese: "録音ファイルを保存",
+        chineseSimplified: "保存录音文件"
+    )
+    static let saveAudioRecordingHelp = localized(
+        english: "Save captured audio as a compressed .m4a file beside the transcript files.",
+        korean: "캡처한 오디오를 기록 파일과 같은 폴더에 압축된 .m4a 파일로 저장합니다.",
+        japanese: "キャプチャした音声を記録ファイルと同じフォルダに圧縮 .m4a ファイルとして保存します。",
+        chineseSimplified: "将捕获的音频以压缩的 .m4a 文件保存到记录文件所在的文件夹。"
+    )
     static let systemAudioInput = localized(
         english: "Mac Audio",
         korean: "PC 소리",
@@ -584,6 +602,12 @@ enum AppText {
         english: "Transcript saved",
         korean: "기록이 저장되었습니다"
     )
+    static func audioRecordingFailed(_ message: String) -> String {
+        localized(
+            english: "Audio recording failed, but capture continues: \(message)",
+            korean: "오디오 녹음에 실패했지만 캡처는 계속됩니다: \(message)"
+        )
+    }
     static let copy = localized(english: "Copy", korean: "복사")
     static let copied = localized(english: "Copied", korean: "복사됨")
     static let appleIntelligenceWritingTools = localized(

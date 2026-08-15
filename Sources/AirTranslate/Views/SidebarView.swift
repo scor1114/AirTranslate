@@ -79,6 +79,20 @@ struct SidebarView: View {
                 SidebarDivider()
 
                 QuickSettingRow(
+                    title: AppText.audioRecording,
+                    systemImage: "record.circle"
+                ) {
+                    Toggle(AppText.saveAudioRecording, isOn: audioRecordingEnabledBinding)
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .disabled(isSessionConfigurationLocked)
+                        .help(AppText.saveAudioRecordingHelp)
+                        .accessibilityLabel(AppText.saveAudioRecording)
+                }
+
+                SidebarDivider()
+
+                QuickSettingRow(
                     title: AppText.localized(english: "Audio", korean: "오디오", japanese: "オーディオ", chineseSimplified: "音频"),
                     systemImage: "mic"
                 ) {
@@ -241,6 +255,10 @@ struct SidebarView: View {
 
     private var microphoneInputDeviceBinding: Binding<String> {
         lockedSessionConfigurationBinding($session.selectedMicrophoneInputDeviceID)
+    }
+
+    private var audioRecordingEnabledBinding: Binding<Bool> {
+        lockedSessionConfigurationBinding($session.isAudioRecordingEnabled)
     }
 
     private var dubbingEnabledBinding: Binding<Bool> {
