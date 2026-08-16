@@ -152,7 +152,7 @@ struct TranscriptLibraryView: View {
         if let selectedTranscript = session.selectedSavedTranscript {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    Text(AppText.editSaved)
+                    Text(selectedTranscript.isAudioOnly ? AppText.audioOnlyRecording : AppText.editSaved)
                         .font(.headline)
 
                     Spacer(minLength: 0)
@@ -193,12 +193,14 @@ struct TranscriptLibraryView: View {
                 draftEditor(for: selectedTranscript)
 
                 HStack {
-                    Button {
-                        session.saveSelectedTranscriptEdits()
-                    } label: {
-                        Label(AppText.saveEdits, systemImage: "checkmark")
+                    if !selectedTranscript.isAudioOnly {
+                        Button {
+                            session.saveSelectedTranscriptEdits()
+                        } label: {
+                            Label(AppText.saveEdits, systemImage: "checkmark")
+                        }
+                        .keyboardShortcut("s", modifiers: [.command])
                     }
-                    .keyboardShortcut("s", modifiers: [.command])
 
                     Spacer(minLength: 0)
 
@@ -217,7 +219,14 @@ struct TranscriptLibraryView: View {
 
     @ViewBuilder
     private func draftEditor(for transcript: SavedTranscript) -> some View {
-        if transcript.isOriginalAndTranslation {
+        if transcript.isAudioOnly {
+            ContentUnavailableView(
+                AppText.audioOnlyRecording,
+                systemImage: "waveform",
+                description: Text(AppText.audioOnlyRecordingDescription)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if transcript.isOriginalAndTranslation {
             HStack(alignment: .top, spacing: 12) {
                 draftEditorPane(
                     title: AppText.original,
@@ -456,7 +465,11 @@ private struct TranscriptLibraryRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: transcript.isOriginalAndTranslation ? "doc.on.doc.fill" : (isSelected ? "doc.text.fill" : "doc.text"))
+            Image(
+                systemName: transcript.isAudioOnly
+                    ? "waveform"
+                    : (transcript.isOriginalAndTranslation ? "doc.on.doc.fill" : (isSelected ? "doc.text.fill" : "doc.text"))
+            )
                 .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                 .frame(width: 16)
 
@@ -466,7 +479,9 @@ private struct TranscriptLibraryRow: View {
                     .foregroundStyle(.primary)
 
                 HStack(spacing: 5) {
-                    if transcript.isOriginalAndTranslation {
+                    if transcript.isAudioOnly {
+                        Text(AppText.audioOnlyRecording)
+                    } else if transcript.isOriginalAndTranslation {
                         Text(AppText.originalAndTranslation)
                     }
 

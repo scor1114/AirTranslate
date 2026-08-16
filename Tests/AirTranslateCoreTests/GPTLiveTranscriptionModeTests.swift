@@ -152,6 +152,30 @@ struct GPTLiveTranscriptionModeTests {
     }
 
     @Test
+    func realtimeTranscriptionForcesCommitAfterFifteenSecondsOfUncommittedAudio() {
+        let transcriber = OpenAIRealtimeTranscriber()
+        let limit = OpenAIRealtimeTranscriber.maximumUncommittedTranscriptionAudioByteCount
+
+        #expect(
+            transcriber.reserveAudioSendSlot(
+                audioByteCount: limit - 1,
+                marksUncommittedTranscriptionAudio: true
+            )
+        )
+        #expect(!transcriber.isTranscriptionCommitPendingForTesting)
+        transcriber.releaseAudioSendSlot()
+
+        #expect(
+            transcriber.reserveAudioSendSlot(
+                audioByteCount: 1,
+                marksUncommittedTranscriptionAudio: true
+            )
+        )
+        #expect(transcriber.isTranscriptionCommitPendingForTesting)
+        transcriber.releaseAudioSendSlot()
+    }
+
+    @Test
     func translationSessionUsesSupportedTranslationContract() throws {
         let data = try OpenAIRealtimeTranscriber.translationSessionUpdateData(language: .korean)
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -641,6 +665,17 @@ struct GPTLiveTranscriptionModeTests {
         #expect(recorder.errors.count == 1)
         #expect(recorder.errors.first?.localizedDescription == AppText.openAIRealtimeConnectionFailed)
         #expect(!recorder.errors.contains(where: { $0.localizedDescription.contains("test-secret-key") }))
+    }
+
+    @Test
+    func serverErrorReleasesOutstandingTranscriptionCommitWaits() {
+        let transcriber = OpenAIRealtimeTranscriber()
+        transcriber.seedOutstandingTranscriptionCommitForTesting()
+
+        #expect(transcriber.outstandingTranscriptionCommitCountForTesting == 1)
+        transcriber.handleEventText(#"{"type":"error"}"#)
+
+        #expect(transcriber.outstandingTranscriptionCommitCountForTesting == 0)
     }
 
     @Test

@@ -529,8 +529,8 @@ enum AppText {
     )
     static let autoSave = localized(english: "Auto-save", korean: "자동 저장")
     static let autoSaveDescription = localized(
-        english: "Transcript text is kept in memory while listening, then saved as a dated plain .txt file with a short content title when capture stops or the app quits.",
-        korean: "기록 중에는 메모리에 유지하고, 캡처 중지 또는 앱 종료 직전에 날짜와 짧은 내용 제목이 들어간 일반 .txt 파일로 저장됩니다."
+        english: "Transcript text is saved as plain .txt. When recording is enabled, .m4a audio also appears here even if no transcript was created.",
+        korean: "전사 텍스트는 일반 .txt로 저장됩니다. 녹음을 켠 경우 전사가 없어도 .m4a 녹음 파일이 여기에 표시됩니다."
     )
     static let openSaveFolder = localized(
         english: "Open Save Folder",
@@ -557,6 +557,14 @@ enum AppText {
     static let noSavedTranscriptSelected = localized(
         english: "Select a saved transcript.",
         korean: "저장된 기록을 선택하세요."
+    )
+    static let audioOnlyRecording = localized(
+        english: "Audio recording",
+        korean: "녹음 파일"
+    )
+    static let audioOnlyRecordingDescription = localized(
+        english: "No transcript text was saved for this recording. Open the save folder to play or manage the .m4a file.",
+        korean: "이 녹음에는 저장된 전사 텍스트가 없습니다. 저장 폴더에서 .m4a 파일을 재생하거나 관리할 수 있습니다."
     )
     static let deleteAllSavedTranscripts = localized(
         english: "Delete All",
@@ -606,6 +614,12 @@ enum AppText {
         localized(
             english: "Audio recording failed, but capture continues: \(message)",
             korean: "오디오 녹음에 실패했지만 캡처는 계속됩니다: \(message)"
+        )
+    }
+    static func audioRecordingSavedSeparately(_ fileName: String) -> String {
+        localized(
+            english: "The recording was saved separately as \(fileName).",
+            korean: "녹음 파일이 \(fileName)(으)로 별도 저장되었습니다."
         )
     }
     static let copy = localized(english: "Copy", korean: "복사")

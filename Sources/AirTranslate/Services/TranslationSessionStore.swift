@@ -246,6 +246,14 @@ private struct RealtimeAudioTransportError: LocalizedError {
     }
 }
 
+private final class SendableAudioSampleBuffer: @unchecked Sendable {
+    let sampleBuffer: CMSampleBuffer
+
+    init(_ sampleBuffer: CMSampleBuffer) {
+        self.sampleBuffer = sampleBuffer
+    }
+}
+
 private final class AudioSamplePipelineRegistry: @unchecked Sendable {
     private struct Pipeline {
         let generation: UInt64
@@ -253,6 +261,8 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         let openAITranscriber: OpenAIRealtimeTranscriber
         let geminiLiveTranslator: GeminiLiveTranslationService
         let recordingWriter: AudioRecordingWriter?
+        let recordingQueue: DispatchQueue?
+        let appendGroup: DispatchGroup
         let recordingFailure: @Sendable (Error) -> Void
     }
 
@@ -274,6 +284,10 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
             openAITranscriber: openAITranscriber,
             geminiLiveTranslator: geminiLiveTranslator,
             recordingWriter: recordingWriter,
+            recordingQueue: recordingWriter == nil
+                ? nil
+                : DispatchQueue(label: "dev.appcaster.AirTranslate.audio-recording.\(generation)"),
+            appendGroup: DispatchGroup(),
             recordingFailure: recordingFailure
         )
         lock.unlock()
@@ -282,27 +296,50 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
     @discardableResult
     func clear() -> URL? {
         lock.lock()
-        let recordingWriter = pipeline?.recordingWriter
-        pipeline = nil
+        let retiredPipeline = pipeline
+        self.pipeline = nil
         lock.unlock()
-        return recordingWriter?.finish()
+        guard let retiredPipeline else { return nil }
+
+        retiredPipeline.appendGroup.wait()
+        guard let recordingWriter = retiredPipeline.recordingWriter,
+              let recordingQueue = retiredPipeline.recordingQueue
+        else { return nil }
+        return recordingQueue.sync {
+            recordingWriter.finish()
+        }
     }
 
     func setRecordingPaused(_ isPaused: Bool) {
         lock.lock()
-        pipeline?.recordingWriter?.isPaused = isPaused
+        let pipeline = pipeline
         lock.unlock()
+        guard let recordingWriter = pipeline?.recordingWriter,
+              let recordingQueue = pipeline?.recordingQueue
+        else { return }
+        recordingQueue.async {
+            recordingWriter.isPaused = isPaused
+        }
     }
 
     func append(_ sampleBuffer: CMSampleBuffer, generation: UInt64) {
         lock.lock()
-        defer { lock.unlock() }
-        guard let pipeline, pipeline.generation == generation else { return }
+        guard let pipeline, pipeline.generation == generation else {
+            lock.unlock()
+            return
+        }
+        pipeline.appendGroup.enter()
+        lock.unlock()
+        defer { pipeline.appendGroup.leave() }
 
-        // clear() waits for any in-flight append to finish before the MainActor
-        // stops or replaces these backends.
-        if let error = pipeline.recordingWriter?.append(sampleBuffer) {
-            pipeline.recordingFailure(error)
+        if let recordingWriter = pipeline.recordingWriter,
+           let recordingQueue = pipeline.recordingQueue {
+            let recordingSampleBuffer = SendableAudioSampleBuffer(sampleBuffer)
+            recordingQueue.async {
+                if let error = recordingWriter.append(recordingSampleBuffer.sampleBuffer) {
+                    pipeline.recordingFailure(error)
+                }
+            }
         }
         pipeline.transcriber.append(sampleBuffer)
         pipeline.openAITranscriber.append(sampleBuffer)
@@ -896,10 +933,9 @@ final class TranslationSessionStore {
     }
 
     func stop() {
-        guard isRunning || isStarting else { return }
+        guard isRunning || isStarting, gptTranscriptionStopTask == nil else { return }
         pipelineLifecycle.stop()
         if isRunning, isUsingGPTTranscriptionMode {
-            guard gptTranscriptionStopTask == nil else { return }
             audioSamplePipelineRegistry.setRecordingPaused(true)
             let transcriberToFinish = openAITranscriber
             gptTranscriptionStopTask = Task { @MainActor [weak self] in
@@ -1738,7 +1774,9 @@ final class TranslationSessionStore {
         guard let transcript = savedTranscripts.first(where: { $0.id == id }) else { return }
 
         selectedSavedTranscriptID = id
-        savedDraftSourceText = loadTranscriptText(fileName: transcript.sourceFileName) ?? transcript.sourceText
+        savedDraftSourceText = transcript.sourceFileName
+            .flatMap(loadTranscriptText(fileName:))
+            ?? transcript.sourceText
         if let translationFileName = transcript.translationFileName,
            let translatedText = loadTranscriptText(fileName: translationFileName) {
             savedDraftTranslationText = translatedText
@@ -1748,7 +1786,9 @@ final class TranslationSessionStore {
     }
 
     func saveSelectedTranscriptEdits() {
-        guard let selectedTranscript = selectedSavedTranscript else { return }
+        guard let selectedTranscript = selectedSavedTranscript,
+              let sourceFileName = selectedTranscript.sourceFileName
+        else { return }
 
         let sourceText = savedDraftSourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sourceText.isEmpty else { return }
@@ -1756,13 +1796,13 @@ final class TranslationSessionStore {
         if selectedTranscript.isOriginalAndTranslation,
            let translationFileName = selectedTranscript.translationFileName {
             let translatedText = savedDraftTranslationText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard writeTranscriptText(sourceText, fileName: selectedTranscript.sourceFileName),
+            guard writeTranscriptText(sourceText, fileName: sourceFileName),
                   writeTranscriptText(translatedText, fileName: translationFileName)
             else {
                 return
             }
         } else {
-            guard writeTranscriptText(sourceText, fileName: selectedTranscript.sourceFileName) else { return }
+            guard writeTranscriptText(sourceText, fileName: sourceFileName) else { return }
         }
 
         let selectedID = selectedTranscript.id
@@ -1772,7 +1812,8 @@ final class TranslationSessionStore {
 
     func polishSelectedTranscriptDraftWithFoundationModel() {
         guard !isFoundationTranscriptCleanupRunning,
-              let selectedTranscript = selectedSavedTranscript
+              let selectedTranscript = selectedSavedTranscript,
+              !selectedTranscript.isAudioOnly
         else {
             return
         }
@@ -1819,11 +1860,15 @@ final class TranslationSessionStore {
         guard let selectedTranscript = selectedSavedTranscript else { return }
 
         savedTranscripts.removeAll { $0.id == selectedTranscript.id }
-        try? FileManager.default.removeItem(at: transcriptURL(fileName: selectedTranscript.sourceFileName))
+        if let sourceFileName = selectedTranscript.sourceFileName {
+            try? FileManager.default.removeItem(at: transcriptURL(fileName: sourceFileName))
+        }
         if let translationFileName = selectedTranscript.translationFileName {
             try? FileManager.default.removeItem(at: transcriptURL(fileName: translationFileName))
         }
-        try? FileManager.default.removeItem(at: associatedRecordingURL(for: selectedTranscript))
+        if let recordingURL = associatedRecordingURL(for: selectedTranscript) {
+            try? FileManager.default.removeItem(at: recordingURL)
+        }
         self.selectedSavedTranscriptID = nil
         savedDraftSourceText = ""
         savedDraftTranslationText = ""
@@ -2392,7 +2437,20 @@ final class TranslationSessionStore {
                         updatedAt: values?.contentModificationDate ?? Date.distantPast
                     )
                 }
-            savedTranscripts = groupedSavedTranscripts(from: transcriptFiles)
+            let recordingFiles = fileURLs
+                .filter { $0.pathExtension.lowercased() == "m4a" }
+                .map { fileURL -> SavedTranscriptFile in
+                    let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey])
+                    return SavedTranscriptFile(
+                        fileName: fileURL.lastPathComponent,
+                        previewText: "",
+                        updatedAt: values?.contentModificationDate ?? Date.distantPast
+                    )
+                }
+            savedTranscripts = savedTranscripts(
+                from: transcriptFiles,
+                recordings: recordingFiles
+            )
             sortSavedTranscripts()
         } catch {
             savedTranscripts = []
@@ -2470,6 +2528,33 @@ final class TranslationSessionStore {
         }
 
         return standaloneTranscripts
+    }
+
+    private func savedTranscripts(
+        from transcriptFiles: [SavedTranscriptFile],
+        recordings: [SavedTranscriptFile]
+    ) -> [SavedTranscript] {
+        var transcripts = groupedSavedTranscripts(from: transcriptFiles)
+        let recordingByName = Dictionary(uniqueKeysWithValues: recordings.map { ($0.fileName, $0) })
+        var associatedRecordingNames = Set<String>()
+
+        for index in transcripts.indices {
+            guard let sourceFileName = transcripts[index].sourceFileName else { continue }
+            let baseFileName = transcriptVariantInfo(sourceFileName)?.baseFileName ?? sourceFileName
+            let recordingName = recordingFileName(forTranscriptBaseFileName: baseFileName)
+            guard recordingByName[recordingName] != nil else { continue }
+            transcripts[index].recordingFileName = recordingName
+            associatedRecordingNames.insert(recordingName)
+        }
+
+        transcripts.append(contentsOf: recordings.compactMap { recording in
+            guard !associatedRecordingNames.contains(recording.fileName) else { return nil }
+            return SavedTranscript(
+                recordingFileName: recording.fileName,
+                updatedAt: recording.updatedAt
+            )
+        })
+        return transcripts
     }
 
     private func stageTranscriptForSave(_ sourceText: String, translatedText: String? = nil) {
@@ -2632,9 +2717,12 @@ final class TranslationSessionStore {
         transcriptsDirectoryURL.appendingPathComponent(fileName)
     }
 
-    private func associatedRecordingURL(for transcript: SavedTranscript) -> URL {
-        let baseFileName = transcriptVariantInfo(transcript.sourceFileName)?.baseFileName
-            ?? transcript.sourceFileName
+    private func associatedRecordingURL(for transcript: SavedTranscript) -> URL? {
+        if let recordingFileName = transcript.recordingFileName {
+            return transcriptURL(fileName: recordingFileName)
+        }
+        guard let sourceFileName = transcript.sourceFileName else { return nil }
+        let baseFileName = transcriptVariantInfo(sourceFileName)?.baseFileName ?? sourceFileName
         return transcriptURL(fileName: recordingFileName(forTranscriptBaseFileName: baseFileName))
     }
 
@@ -2644,18 +2732,30 @@ final class TranslationSessionStore {
     }
 
     private func associateRecording(_ recordingURL: URL?, withTranscriptBaseFileName fileName: String?) {
-        guard let recordingURL, let fileName else { return }
+        guard let recordingURL else { return }
+        guard let fileName else {
+            loadSavedTranscripts()
+            return
+        }
 
         let destinationURL = transcriptURL(
             fileName: recordingFileName(forTranscriptBaseFileName: fileName)
         )
-        guard recordingURL.standardizedFileURL != destinationURL.standardizedFileURL else { return }
+        guard recordingURL.standardizedFileURL != destinationURL.standardizedFileURL else {
+            loadSavedTranscripts()
+            return
+        }
 
         do {
             try FileManager.default.moveItem(at: recordingURL, to: destinationURL)
         } catch {
-            statusMessage = AppText.audioRecordingFailed(error.localizedDescription)
+            if FileManager.default.fileExists(atPath: recordingURL.path) {
+                statusMessage = AppText.audioRecordingSavedSeparately(recordingURL.lastPathComponent)
+            } else {
+                statusMessage = AppText.audioRecordingFailed(error.localizedDescription)
+            }
         }
+        loadSavedTranscripts()
     }
 
     private func transcriptVariantFileName(_ fileName: String, suffix: String) -> String {

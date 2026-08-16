@@ -247,6 +247,32 @@ struct TranslationSessionStoreLanguageCandidateTests {
 
     @Test
     @MainActor
+    func audioOnlyRecordingAppearsInLibraryAndCanBeDeleted() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateAudioOnlyTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recordingURL = directory.appendingPathComponent("2026-08-16_09-00-00_microphone.m4a")
+        try Data([0]).write(to: recordingURL)
+
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory
+        )
+        let recording = try #require(session.savedTranscripts.first)
+
+        #expect(recording.isAudioOnly)
+        #expect(recording.recordingFileName == recordingURL.lastPathComponent)
+
+        session.selectSavedTranscript(recording.id)
+        session.deleteSelectedTranscript()
+
+        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+    }
+
+    @Test
+    @MainActor
     func transcribeOnlyModeHidesTranslationPane() {
         let session = TranslationSessionStore()
 

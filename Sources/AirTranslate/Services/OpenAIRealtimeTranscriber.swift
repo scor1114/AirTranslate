@@ -31,6 +31,9 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     private static let realtimeAudioSampleRate = 24_000
     private static let maxAudioChunkMilliseconds = 80
     private static let bytesPerPCM16Sample = 2
+    static let maximumUncommittedTranscriptionAudioByteCount = realtimeAudioSampleRate
+        * bytesPerPCM16Sample
+        * 15
     private static let maxPCM16AudioChunkByteCount = realtimeAudioSampleRate
         * bytesPerPCM16Sample
         * maxAudioChunkMilliseconds
@@ -85,6 +88,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     private var isPaused = false
     private var pendingAudioSendCount = 0
     private var hasUncommittedTranscriptionAudio = false
+    private var uncommittedTranscriptionAudioByteCount = 0
     private var isTranscriptionCommitPending = false
     private var nextTranscriptionCommitID: UInt64 = 0
     private var transcriptionCommitIDsAwaitingAcknowledgement: [UInt64] = []
@@ -420,6 +424,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         isPaused = false
         pendingAudioSendCount = 0
         hasUncommittedTranscriptionAudio = false
+        uncommittedTranscriptionAudioByteCount = 0
         isTranscriptionCommitPending = false
         transcriptionCommitIDsAwaitingAcknowledgement.removeAll()
         transcriptionCommitIDByItemID.removeAll()
@@ -448,13 +453,17 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     }
 
     @discardableResult
-    func reserveAudioSendSlot(audioByteCount: Int) -> Bool {
+    func reserveAudioSendSlot(
+        audioByteCount: Int,
+        marksUncommittedTranscriptionAudio: Bool = false
+    ) -> Bool {
         stateLock.lock()
         let generation = connectionGeneration
         stateLock.unlock()
         return reserveAudioSendSlot(
             audioByteCount: audioByteCount,
-            generation: generation
+            generation: generation,
+            marksUncommittedTranscriptionAudio: marksUncommittedTranscriptionAudio
         )
     }
 
@@ -484,6 +493,11 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         pendingAudioSendCount += 1
         if marksUncommittedTranscriptionAudio, outputMode == .transcription {
             hasUncommittedTranscriptionAudio = true
+            uncommittedTranscriptionAudioByteCount += max(0, audioByteCount)
+            if uncommittedTranscriptionAudioByteCount
+                >= Self.maximumUncommittedTranscriptionAudioByteCount {
+                isTranscriptionCommitPending = true
+            }
         }
         stateLock.unlock()
         return true
@@ -522,6 +536,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         nextTranscriptionCommitID &+= 1
         let id = nextTranscriptionCommitID
         hasUncommittedTranscriptionAudio = false
+        uncommittedTranscriptionAudioByteCount = 0
         isTranscriptionCommitPending = false
         transcriptionCommitIDsAwaitingAcknowledgement.append(id)
         outstandingTranscriptionCommitIDs.insert(id)
@@ -558,6 +573,18 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         transcriptionCommitIDByItemID = transcriptionCommitIDByItemID.filter { $0.value != id }
         outstandingTranscriptionCommitIDs.remove(id)
         stateLock.unlock()
+    }
+
+    private func failOutstandingTranscriptionCommits(generation: UInt64) {
+        stateLock.withLock {
+            guard connectionGeneration == generation else { return }
+            hasUncommittedTranscriptionAudio = false
+            uncommittedTranscriptionAudioByteCount = 0
+            isTranscriptionCommitPending = false
+            transcriptionCommitIDsAwaitingAcknowledgement.removeAll()
+            transcriptionCommitIDByItemID.removeAll()
+            outstandingTranscriptionCommitIDs.removeAll()
+        }
     }
 
     private func acknowledgeTranscriptionCommit(itemID: String, generation: UInt64) {
@@ -858,6 +885,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                   !delta.isEmpty else { return }
             publishOutputAudioIfCurrent(delta, generation: generation)
         case "error":
+            failOutstandingTranscriptionCommits(generation: generation)
             publishFailureIfCurrent(
                 OpenAIRealtimeTranscriberError.connectionFailed,
                 generation: generation
@@ -1532,6 +1560,12 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         self.receiveTask = nil
         self.webSocketTask = nil
         pendingAudioSendCount = 0
+        hasUncommittedTranscriptionAudio = false
+        uncommittedTranscriptionAudioByteCount = 0
+        isTranscriptionCommitPending = false
+        transcriptionCommitIDsAwaitingAcknowledgement.removeAll()
+        transcriptionCommitIDByItemID.removeAll()
+        outstandingTranscriptionCommitIDs.removeAll()
         resetRealtimeTranscriptBuffers()
         stateLock.unlock()
         receiveTask?.cancel()
@@ -1559,6 +1593,24 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         defer { stateLock.unlock() }
         return connectionGeneration
     }
+
+    #if DEBUG
+    var isTranscriptionCommitPendingForTesting: Bool {
+        stateLock.withLock { isTranscriptionCommitPending }
+    }
+
+    var outstandingTranscriptionCommitCountForTesting: Int {
+        stateLock.withLock { outstandingTranscriptionCommitIDs.count }
+    }
+
+    func seedOutstandingTranscriptionCommitForTesting() {
+        stateLock.withLock {
+            nextTranscriptionCommitID &+= 1
+            transcriptionCommitIDsAwaitingAcknowledgement.append(nextTranscriptionCommitID)
+            outstandingTranscriptionCommitIDs.insert(nextTranscriptionCommitID)
+        }
+    }
+    #endif
 
     @discardableResult
     private func resetRealtimeTranscriptBuffers(

@@ -2,7 +2,7 @@ import AudioToolbox
 import AVFoundation
 import Foundation
 
-final class AudioRecordingWriter {
+final class AudioRecordingWriter: @unchecked Sendable {
     private let directoryURL: URL
     private let inputSource: AudioInputSource
     private let startedAt: Date
@@ -90,7 +90,10 @@ final class AudioRecordingWriter {
                 &file
             )
         )
-        guard let file else { throw AudioRecordingError.couldNotCreateFile }
+        guard let file else {
+            try? FileManager.default.removeItem(at: fileURL)
+            throw AudioRecordingError.couldNotCreateFile
+        }
 
         var clientFormat = AudioStreamBasicDescription(
             mSampleRate: sampleRate,
@@ -111,6 +114,7 @@ final class AudioRecordingWriter {
         )
         guard status == noErr else {
             ExtAudioFileDispose(file)
+            try? FileManager.default.removeItem(at: fileURL)
             try Self.check(status)
             return
         }
@@ -186,20 +190,40 @@ final class AudioRecordingWriter {
             )
             try check(status)
 
-            let isFloat = streamDescription.pointee.mFormatFlags & kAudioFormatFlagIsFloat != 0
-            var pcm16 = Data()
-            for buffer in UnsafeMutableAudioBufferListPointer(audioBufferList) {
-                guard let source = buffer.mData else { continue }
-                if isFloat {
-                    let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-                    let samples = source.bindMemory(to: Float.self, capacity: count)
-                    for index in 0..<count {
-                        var sample = Int16(max(-1, min(1, samples[index])) * Float(Int16.max)).littleEndian
-                        withUnsafeBytes(of: &sample) { pcm16.append(contentsOf: $0) }
-                    }
-                } else {
-                    pcm16.append(source.assumingMemoryBound(to: UInt8.self), count: Int(buffer.mDataByteSize))
+            let format = streamDescription.pointee
+            let isFloat = format.mFormatFlags & kAudioFormatFlagIsFloat != 0
+            let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            if isFloat {
+                let sampleCount = buffers.reduce(into: 0) { count, buffer in
+                    count += Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
                 }
+                var samples = [Int16]()
+                samples.reserveCapacity(sampleCount)
+                for buffer in buffers {
+                    guard let source = buffer.mData else { continue }
+                    let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+                    let sourceSamples = source.bindMemory(to: Float.self, capacity: count)
+                    for index in 0..<count {
+                        samples.append(
+                            Int16(max(-1, min(1, sourceSamples[index])) * Float(Int16.max)).littleEndian
+                        )
+                    }
+                }
+                guard !samples.isEmpty else { throw AudioRecordingError.unsupportedInputFormat }
+                return samples.withUnsafeBufferPointer { Data(buffer: $0) }
+            }
+
+            let isSignedInteger = format.mFormatFlags & kLinearPCMFormatFlagIsSignedInteger != 0
+            let isBigEndian = format.mFormatFlags & kLinearPCMFormatFlagIsBigEndian != 0
+            guard format.mBitsPerChannel == 16, isSignedInteger, !isBigEndian else {
+                throw AudioRecordingError.unsupportedInputFormat
+            }
+
+            var pcm16 = Data()
+            pcm16.reserveCapacity(buffers.reduce(into: 0) { $0 += Int($1.mDataByteSize) })
+            for buffer in buffers {
+                guard let source = buffer.mData else { continue }
+                pcm16.append(source.assumingMemoryBound(to: UInt8.self), count: Int(buffer.mDataByteSize))
             }
             guard !pcm16.isEmpty else { throw AudioRecordingError.unsupportedInputFormat }
             return pcm16
