@@ -34,6 +34,9 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     static let maximumUncommittedTranscriptionAudioByteCount = realtimeAudioSampleRate
         * bytesPerPCM16Sample
         * 15
+    static let minimumTranscriptionCommitAudioByteCount = realtimeAudioSampleRate
+        * bytesPerPCM16Sample
+        / 10
     private static let maxPCM16AudioChunkByteCount = realtimeAudioSampleRate
         * bytesPerPCM16Sample
         * maxAudioChunkMilliseconds
@@ -530,7 +533,8 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         guard outputMode == .transcription,
               allowsPaused || !isPaused,
               let webSocketTask,
-              hasUncommittedTranscriptionAudio
+              hasUncommittedTranscriptionAudio,
+              Self.hasMinimumTranscriptionCommitAudio(uncommittedTranscriptionAudioByteCount)
         else { return nil }
 
         nextTranscriptionCommitID &+= 1
@@ -886,6 +890,9 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             publishOutputAudioIfCurrent(delta, generation: generation)
         case "error":
             failOutstandingTranscriptionCommits(generation: generation)
+            guard outputMode != .transcription
+                    || !Self.isRecoverableTranscriptionCommitError(event.error)
+            else { return }
             publishFailureIfCurrent(
                 OpenAIRealtimeTranscriberError.connectionFailed,
                 generation: generation
@@ -903,6 +910,17 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             return error
         }
         return OpenAIRealtimeTranscriberError.connectionFailed
+    }
+
+    private static func isRecoverableTranscriptionCommitError(
+        _ error: OpenAIRealtimeErrorBody?
+    ) -> Bool {
+        error?.code == "input_audio_buffer_commit_empty"
+            || error?.type == "input_audio_buffer_commit_empty"
+    }
+
+    static func hasMinimumTranscriptionCommitAudio(_ byteCount: Int) -> Bool {
+        byteCount >= minimumTranscriptionCommitAudioByteCount
     }
 
     private func appendRealtimeTranscriptionDelta(
@@ -1964,6 +1982,8 @@ private struct OpenAIRealtimeConversationContent: Decodable {
 }
 
 private struct OpenAIRealtimeErrorBody: Decodable {
+    let code: String?
+    let type: String?
     let message: String?
 }
 

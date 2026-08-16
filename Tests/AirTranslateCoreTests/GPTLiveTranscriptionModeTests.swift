@@ -53,6 +53,14 @@ private func waitForSignal(_ semaphore: DispatchSemaphore) async -> Bool {
     }
 }
 
+@MainActor
+private func waitForSessionStop(_ session: TranslationSessionStore) async {
+    for _ in 0..<200 {
+        if !session.isRunning && !session.isStarting { return }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+}
+
 private final class RealtimeTranscriptDeliveryPause: @unchecked Sendable {
     private let didPause = DispatchSemaphore(value: 0)
     private let mayResume = DispatchSemaphore(value: 0)
@@ -68,6 +76,21 @@ private final class RealtimeTranscriptDeliveryPause: @unchecked Sendable {
 
     func resume() {
         mayResume.signal()
+    }
+}
+
+private actor SuspendedCaptureStop {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var didStart = false
+
+    func stop() async {
+        didStart = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 
@@ -679,6 +702,24 @@ struct GPTLiveTranscriptionModeTests {
     }
 
     @Test
+    func shortCommitIsBlockedAndCommitEmptyErrorIsRecoverable() {
+        let transcriber = OpenAIRealtimeTranscriber()
+        let recorder = GPTLiveTranscriptionRecorder()
+        transcriber.delegate = recorder
+        transcriber.seedOutstandingTranscriptionCommitForTesting()
+
+        #expect(OpenAIRealtimeTranscriber.minimumTranscriptionCommitAudioByteCount == 4_800)
+        #expect(!OpenAIRealtimeTranscriber.hasMinimumTranscriptionCommitAudio(4_799))
+        #expect(OpenAIRealtimeTranscriber.hasMinimumTranscriptionCommitAudio(4_800))
+        transcriber.handleEventText(
+            #"{"type":"error","error":{"type":"invalid_request_error","code":"input_audio_buffer_commit_empty"}}"#
+        )
+
+        #expect(transcriber.outstandingTranscriptionCommitCountForTesting == 0)
+        #expect(recorder.errors.isEmpty)
+    }
+
+    @Test
     @MainActor
     func openAIProxyFailureStopsTheMatchingStoreGeneration() async {
         let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
@@ -743,6 +784,31 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
+    func gptStopStopsCaptureBeforeDrainAndSecondStopAborts() async {
+        let captureStop = SuspendedCaptureStop()
+        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+        session.useGPTTranscriptionMode()
+        _ = session.activateLiveCallbackPipelineForTesting()
+        session.setCaptureStopHandlerForTesting { await captureStop.stop() }
+
+        session.stop()
+        for _ in 0..<100 where !(await captureStop.didStart) {
+            await Task.yield()
+        }
+
+        #expect(await captureStop.didStart)
+        #expect(session.isRunning)
+        #expect(session.statusMessage == AppText.stopping)
+
+        session.stop()
+
+        #expect(!session.isRunning)
+        #expect(session.statusMessage == AppText.stopped)
+        await captureStop.resume()
+    }
+
+    @Test
+    @MainActor
     func storeStopClaimsRegisteredTerminalPausedAfterDrainBeforeAutosave() async {
         let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
         let pipeline = session.activateLiveCallbackPipelineForTesting()
@@ -764,6 +830,7 @@ struct GPTLiveTranscriptionModeTests {
         session.stop()
         deliveryPause.resume()
         await completionTask.value
+        await waitForSessionStop(session)
 
         #expect(reachedDrain)
         #expect(!session.isRunning)
@@ -774,7 +841,7 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func storeStopFlushesItemIDLessTerminalBeforeAutosave() {
+    func storeStopFlushesItemIDLessTerminalBeforeAutosave() async {
         let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
         let pipeline = session.activateLiveCallbackPipelineForTesting()
 
@@ -782,6 +849,7 @@ struct GPTLiveTranscriptionModeTests {
             #"{"type":"conversation.item.input_audio_transcription.completed","transcript":"Itemless store final"}"#
         )
         session.stop()
+        await waitForSessionStop(session)
 
         #expect(
             session.lines.filter { $0.sourceText.contains("Itemless store final") }.count == 1
@@ -797,6 +865,7 @@ struct GPTLiveTranscriptionModeTests {
             #"{"type":"conversation.item.input_audio_transcription.completed","transcript":"queued-stale"}"#
         )
         session.stop()
+        await waitForSessionStop(session)
         let secondPipeline = session.activateLiveCallbackPipelineForTesting()
 
         firstPipeline.openAITranscriber.delegate = session

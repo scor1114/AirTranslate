@@ -12,6 +12,9 @@ final class AudioRecordingWriter: @unchecked Sendable {
     private var hasWrittenAudio = false
     var didOpenFile: (@Sendable (URL) -> Void)?
     var isPaused = false
+    #if DEBUG
+    var beforeAppendForTesting: (@Sendable () -> Void)?
+    #endif
 
     init(directoryURL: URL, inputSource: AudioInputSource, startedAt: Date = Date()) {
         self.directoryURL = directoryURL
@@ -25,6 +28,9 @@ final class AudioRecordingWriter: @unchecked Sendable {
 
     func append(_ sampleBuffer: CMSampleBuffer) -> Error? {
         guard !isPaused, !didFail else { return nil }
+        #if DEBUG
+        beforeAppendForTesting?()
+        #endif
 
         do {
             let audio = try Self.pcm16Audio(from: sampleBuffer)

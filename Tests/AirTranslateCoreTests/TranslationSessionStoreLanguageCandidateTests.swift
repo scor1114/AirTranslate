@@ -273,7 +273,7 @@ struct TranslationSessionStoreLanguageCandidateTests {
 
     @Test
     @MainActor
-    func activeRecordingIsHiddenAndProtectedFromDeletion() throws {
+    func activeRecordingIsHiddenAndProtectedFromDeletion() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AirTranslateActiveRecordingTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -304,8 +304,6 @@ struct TranslationSessionStoreLanguageCandidateTests {
             recordingWriter: writer,
             recordingFailure: { _ in }
         )
-        defer { _ = registry.clear() }
-
         sessionBeforePublish.deleteSelectedTranscript()
         #expect(FileManager.default.fileExists(atPath: activeURL.path))
 
@@ -326,6 +324,7 @@ struct TranslationSessionStoreLanguageCandidateTests {
         #expect(FileManager.default.fileExists(atPath: activeURL.path))
         #expect(!FileManager.default.fileExists(atPath: removableTranscriptURL.path))
         #expect(!FileManager.default.fileExists(atPath: removableRecordingURL.path))
+        _ = await registry.beginClear().value
     }
 
     @Test

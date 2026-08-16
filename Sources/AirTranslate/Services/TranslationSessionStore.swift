@@ -254,21 +254,55 @@ private final class SendableAudioSampleBuffer: @unchecked Sendable {
     }
 }
 
+struct AudioRecordingQueueDegradation: Equatable, Sendable {
+    let droppedChunkCount: Int
+    let droppedByteCount: Int
+    let pendingAppendLimit: Int
+}
+
+struct AudioRecordingFinalization: Sendable {
+    let fileURL: URL?
+    let degradation: AudioRecordingQueueDegradation?
+}
+
 final class AudioSamplePipelineRegistry: @unchecked Sendable {
-    private struct Pipeline {
+    static let maximumPendingRecordingAppendCount = 32
+
+    private final class Pipeline: @unchecked Sendable {
         let generation: UInt64
         let transcriber: LiveSpeechTranscriber
         let openAITranscriber: OpenAIRealtimeTranscriber
         let geminiLiveTranslator: GeminiLiveTranslationService
         let recordingWriter: AudioRecordingWriter?
         let recordingQueue: DispatchQueue?
-        let appendGroup: DispatchGroup
         let recordingFailure: @Sendable (Error) -> Void
+        var pendingRecordingAppendCount = 0
+        var droppedAudioChunkCount = 0
+        var droppedAudioByteCount = 0
+
+        init(
+            generation: UInt64,
+            transcriber: LiveSpeechTranscriber,
+            openAITranscriber: OpenAIRealtimeTranscriber,
+            geminiLiveTranslator: GeminiLiveTranslationService,
+            recordingWriter: AudioRecordingWriter?,
+            recordingQueue: DispatchQueue?,
+            recordingFailure: @escaping @Sendable (Error) -> Void
+        ) {
+            self.generation = generation
+            self.transcriber = transcriber
+            self.openAITranscriber = openAITranscriber
+            self.geminiLiveTranslator = geminiLiveTranslator
+            self.recordingWriter = recordingWriter
+            self.recordingQueue = recordingQueue
+            self.recordingFailure = recordingFailure
+        }
     }
 
     private let lock = NSLock()
     private var pipeline: Pipeline?
     private var activeRecordingFileURL: URL?
+    private var activeRecordingGeneration: UInt64?
 
     func publish(
         generation: UInt64,
@@ -283,6 +317,7 @@ final class AudioSamplePipelineRegistry: @unchecked Sendable {
             self?.recordingDidOpen(fileURL, generation: generation)
         }
         activeRecordingFileURL = recordingWriter?.fileURL
+        activeRecordingGeneration = recordingWriter == nil ? nil : generation
         pipeline = Pipeline(
             generation: generation,
             transcriber: transcriber,
@@ -292,27 +327,40 @@ final class AudioSamplePipelineRegistry: @unchecked Sendable {
             recordingQueue: recordingWriter == nil
                 ? nil
                 : DispatchQueue(label: "dev.appcaster.AirTranslate.audio-recording.\(generation)"),
-            appendGroup: DispatchGroup(),
             recordingFailure: recordingFailure
         )
         lock.unlock()
     }
 
     @discardableResult
-    func clear() -> URL? {
+    func beginClear() -> Task<AudioRecordingFinalization, Never> {
         lock.lock()
         let retiredPipeline = pipeline
         self.pipeline = nil
-        activeRecordingFileURL = nil
         lock.unlock()
-        guard let retiredPipeline else { return nil }
-
-        retiredPipeline.appendGroup.wait()
+        guard let retiredPipeline else {
+            return Task { AudioRecordingFinalization(fileURL: nil, degradation: nil) }
+        }
         guard let recordingWriter = retiredPipeline.recordingWriter,
               let recordingQueue = retiredPipeline.recordingQueue
-        else { return nil }
-        return recordingQueue.sync {
-            recordingWriter.finish()
+        else {
+            clearActiveRecording(generation: retiredPipeline.generation)
+            return Task { AudioRecordingFinalization(fileURL: nil, degradation: nil) }
+        }
+
+        return Task {
+            await withCheckedContinuation { continuation in
+                recordingQueue.async { [self] in
+                    let fileURL = recordingWriter.finish()
+                    clearActiveRecording(generation: retiredPipeline.generation)
+                    continuation.resume(
+                        returning: AudioRecordingFinalization(
+                            fileURL: fileURL,
+                            degradation: recordingQueueDegradation(for: retiredPipeline)
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -327,18 +375,30 @@ final class AudioSamplePipelineRegistry: @unchecked Sendable {
         defer { lock.unlock() }
         guard pipeline?.generation == generation else { return }
         activeRecordingFileURL = fileURL
+        activeRecordingGeneration = generation
+    }
+
+    private func clearActiveRecording(generation: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard activeRecordingGeneration == generation else { return }
+        activeRecordingFileURL = nil
+        activeRecordingGeneration = nil
     }
 
     func setRecordingPaused(_ isPaused: Bool) {
         lock.lock()
-        let pipeline = pipeline
-        lock.unlock()
-        guard let recordingWriter = pipeline?.recordingWriter,
-              let recordingQueue = pipeline?.recordingQueue
-        else { return }
+        guard let pipeline,
+              let recordingWriter = pipeline.recordingWriter,
+              let recordingQueue = pipeline.recordingQueue
+        else {
+            lock.unlock()
+            return
+        }
         recordingQueue.async {
             recordingWriter.isPaused = isPaused
         }
+        lock.unlock()
     }
 
     func append(_ sampleBuffer: CMSampleBuffer, generation: UInt64) {
@@ -347,22 +407,60 @@ final class AudioSamplePipelineRegistry: @unchecked Sendable {
             lock.unlock()
             return
         }
-        pipeline.appendGroup.enter()
-        lock.unlock()
-        defer { pipeline.appendGroup.leave() }
 
         if let recordingWriter = pipeline.recordingWriter,
            let recordingQueue = pipeline.recordingQueue {
-            let recordingSampleBuffer = SendableAudioSampleBuffer(sampleBuffer)
-            recordingQueue.async {
-                if let error = recordingWriter.append(recordingSampleBuffer.sampleBuffer) {
-                    pipeline.recordingFailure(error)
+            if pipeline.pendingRecordingAppendCount < Self.maximumPendingRecordingAppendCount {
+                pipeline.pendingRecordingAppendCount += 1
+                let recordingSampleBuffer = SendableAudioSampleBuffer(sampleBuffer)
+                recordingQueue.async { [self] in
+                    if let error = recordingWriter.append(recordingSampleBuffer.sampleBuffer) {
+                        pipeline.recordingFailure(error)
+                    }
+                    completeRecordingAppend(for: pipeline)
                 }
+            } else {
+                pipeline.droppedAudioChunkCount += 1
+                pipeline.droppedAudioByteCount += max(0, CMSampleBufferGetTotalSampleSize(sampleBuffer))
             }
         }
+        lock.unlock()
+
         pipeline.transcriber.append(sampleBuffer)
         pipeline.openAITranscriber.append(sampleBuffer)
         pipeline.geminiLiveTranslator.append(sampleBuffer)
+    }
+
+    func recordingQueueDegradation() -> AudioRecordingQueueDegradation? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let pipeline else { return nil }
+        return recordingQueueDegradationLocked(for: pipeline)
+    }
+
+    private func completeRecordingAppend(for pipeline: Pipeline) {
+        lock.lock()
+        pipeline.pendingRecordingAppendCount = max(0, pipeline.pendingRecordingAppendCount - 1)
+        lock.unlock()
+    }
+
+    private func recordingQueueDegradation(
+        for pipeline: Pipeline
+    ) -> AudioRecordingQueueDegradation? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordingQueueDegradationLocked(for: pipeline)
+    }
+
+    private func recordingQueueDegradationLocked(
+        for pipeline: Pipeline
+    ) -> AudioRecordingQueueDegradation? {
+        guard pipeline.droppedAudioChunkCount > 0 else { return nil }
+        return AudioRecordingQueueDegradation(
+            droppedChunkCount: pipeline.droppedAudioChunkCount,
+            droppedByteCount: pipeline.droppedAudioByteCount,
+            pendingAppendLimit: Self.maximumPendingRecordingAppendCount
+        )
     }
 }
 
@@ -696,8 +794,10 @@ final class TranslationSessionStore {
     private var activeCaptureStartGeneration: UInt64?
 #if DEBUG
     private var permissionSuspendedStartContinuations: [UInt64: CheckedContinuation<Void, Never>] = [:]
+    private var captureStopHandlerForTesting: (@Sendable () async -> Void)?
 #endif
     private var captureStopTask: Task<Void, Never>?
+    private var recordingFinalizationTask: Task<Void, Never>?
     private var gptTranscriptionStopTask: Task<Void, Never>?
     private var pipelineLifecycle = PipelineLifecycleState()
     private var activeCaptionerGeneration: UInt64?
@@ -866,6 +966,10 @@ final class TranslationSessionStore {
                     await captureStopTask.value
                     self.captureStopTask = nil
                 }
+                if let recordingFinalizationTask {
+                    await recordingFinalizationTask.value
+                    self.recordingFinalizationTask = nil
+                }
                 try validatePipelineStart(generation: generation, configuration: configuration)
                 if configuration.audioInputSource == .systemAudio {
                     try systemAudioCapture.requestScreenRecordingAccess()
@@ -954,14 +1058,25 @@ final class TranslationSessionStore {
     }
 
     func stop() {
-        guard isRunning || isStarting, gptTranscriptionStopTask == nil else { return }
+        if let gptTranscriptionStopTask {
+            gptTranscriptionStopTask.cancel()
+            self.gptTranscriptionStopTask = nil
+            finishPipeline(statusOverride: nil)
+            return
+        }
+        guard isRunning || isStarting else { return }
         pipelineLifecycle.stop()
         if isRunning, isUsingGPTTranscriptionMode {
+            statusMessage = AppText.stopping
             audioSamplePipelineRegistry.setRecordingPaused(true)
+            let captureStopTask = beginCaptureStop()
             let transcriberToFinish = openAITranscriber
             gptTranscriptionStopTask = Task { @MainActor [weak self] in
+                await captureStopTask.value
+                guard !Task.isCancelled else { return }
                 _ = await transcriberToFinish.finishPendingTranscriptionAudio()
                 guard let self,
+                      !Task.isCancelled,
                       self.gptTranscriptionStopTask != nil,
                       self.openAITranscriber === transcriberToFinish
                 else { return }
@@ -1002,23 +1117,28 @@ final class TranslationSessionStore {
         } else if !hadTranscriptToSave {
             statusMessage = AppText.stopped
         }
-        let recordingURL = stopCaptioners(openAITranscriberAlreadyStopped: true)
-        associateRecording(
-            recordingURL,
-            withTranscriptBaseFileName: activeRecordingTranscriptBaseFileName ?? savedTranscriptBaseFileName
+        let recordingBaseFileName = activeRecordingTranscriptBaseFileName ?? savedTranscriptBaseFileName
+        let recordingFinalization = stopCaptioners(openAITranscriberAlreadyStopped: true)
+        scheduleRecordingFinalization(
+            recordingFinalization,
+            transcriptBaseFileName: recordingBaseFileName
         )
         activeRecordingTranscriptBaseFileName = nil
         if didSaveTranscript {
             showToast(AppText.transcriptSavedToast)
         }
 
-        let previousStopTask = captureStopTask
-        captureStopTask = Task { @MainActor in
-            if let previousStopTask {
-                await previousStopTask.value
-            }
-            await stopCapture()
+        _ = beginCaptureStop()
+    }
+
+    private func beginCaptureStop() -> Task<Void, Never> {
+        if let captureStopTask { return captureStopTask }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.stopCapture()
         }
+        captureStopTask = task
+        return task
     }
 
     private func invalidateCaptureStartAttempt() {
@@ -1278,7 +1398,7 @@ final class TranslationSessionStore {
         showToast(AppText.appleAutoLanguageModeUnavailableToast)
     }
 
-    func prepareForTermination() {
+    func prepareForTermination() async {
         autoStartAfterModelAssetDownloadTask?.cancel()
         cancelTranslationSessionWarmup()
         transcriptCheckpointTask?.cancel()
@@ -1286,12 +1406,19 @@ final class TranslationSessionStore {
         flushPendingRecognizedCaption()
         flushPendingCaptionPresentation()
         let savedTranscriptBaseFileName = flushPendingTranscriptSave()
-        let recordingURL = audioSamplePipelineRegistry.clear()
+        if let recordingFinalizationTask {
+            await recordingFinalizationTask.value
+            self.recordingFinalizationTask = nil
+        }
+        let recordingFinalization = stopCaptioners()
+        let recordingResult = await recordingFinalization.value
         associateRecording(
-            recordingURL,
+            recordingResult.fileURL,
             withTranscriptBaseFileName: activeRecordingTranscriptBaseFileName ?? savedTranscriptBaseFileName
         )
+        reportRecordingDegradation(recordingResult.degradation)
         activeRecordingTranscriptBaseFileName = nil
+        await beginCaptureStop().value
     }
 
     func openPrivacySettings() {
@@ -2069,8 +2196,10 @@ final class TranslationSessionStore {
     }
 
     @discardableResult
-    private func stopCaptioners(openAITranscriberAlreadyStopped: Bool = false) -> URL? {
-        let recordingURL = audioSamplePipelineRegistry.clear()
+    private func stopCaptioners(
+        openAITranscriberAlreadyStopped: Bool = false
+    ) -> Task<AudioRecordingFinalization, Never> {
+        let recordingFinalization = audioSamplePipelineRegistry.beginClear()
         activeCaptionerGeneration = nil
         openAITranscriber.onAudioTransportDegraded = nil
         geminiLiveTranslator.onAudioTransportDegraded = nil
@@ -2082,7 +2211,33 @@ final class TranslationSessionStore {
             openAITranscriber.stop()
         }
         geminiLiveTranslator.stop()
-        return recordingURL
+        return recordingFinalization
+    }
+
+    private func scheduleRecordingFinalization(
+        _ finalization: Task<AudioRecordingFinalization, Never>,
+        transcriptBaseFileName: String?
+    ) {
+        let previousFinalization = recordingFinalizationTask
+        recordingFinalizationTask = Task { @MainActor [weak self] in
+            if let previousFinalization {
+                await previousFinalization.value
+            }
+            let result = await finalization.value
+            guard let self else { return }
+            self.associateRecording(
+                result.fileURL,
+                withTranscriptBaseFileName: transcriptBaseFileName
+            )
+            self.reportRecordingDegradation(result.degradation)
+        }
+    }
+
+    private func reportRecordingDegradation(
+        _ degradation: AudioRecordingQueueDegradation?
+    ) {
+        guard let degradation else { return }
+        statusMessage = AppText.audioRecordingDroppedChunks(degradation.droppedChunkCount)
     }
 
     private func flushOpenAITerminalTranscriptMailbox() {
@@ -2432,6 +2587,12 @@ final class TranslationSessionStore {
     }
 
     private func stopCapture() async {
+        #if DEBUG
+        if let captureStopHandlerForTesting {
+            await captureStopHandlerForTesting()
+            return
+        }
+        #endif
         await systemAudioCapture.stop()
         await microphoneAudioCapture.stop()
     }
@@ -4735,6 +4896,12 @@ final class TranslationSessionStore {
         isStarting = false
         isRunning = true
         return (generation, transcriber, openAITranscriber)
+    }
+
+    func setCaptureStopHandlerForTesting(
+        _ handler: (@Sendable () async -> Void)?
+    ) {
+        captureStopHandlerForTesting = handler
     }
 
     func warmTranslationSessionForTesting() {

@@ -152,7 +152,7 @@ struct LongSessionCaptionPresentationTests {
             confidence: 0.9
         )
         await Task.yield()
-        session.prepareForTermination()
+        await session.prepareForTermination()
 
         #expect(session.lines.last?.sourceText.hasSuffix("termination buffered words") == true)
         let savedFiles = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)

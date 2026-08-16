@@ -343,7 +343,7 @@ enum MenuBarCapturePhase: Equatable {
         case .starting:
             statusMessage
         case .running:
-            AppText.menuBarRunningTitle
+            statusMessage == AppText.stopping ? statusMessage : AppText.menuBarRunningTitle
         case .paused:
             AppText.paused
         }

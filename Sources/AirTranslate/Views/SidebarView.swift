@@ -438,6 +438,9 @@ private struct SidebarSessionStatus: View {
     }
 
     private var statusTitle: String {
+        if session.statusMessage == AppText.stopping {
+            return AppText.stopping
+        }
         if session.isPaused {
             return AppText.paused
         }
@@ -448,6 +451,9 @@ private struct SidebarSessionStatus: View {
     }
 
     private var statusSymbolName: String {
+        if session.statusMessage == AppText.stopping {
+            return "stop.circle.fill"
+        }
         if session.isPaused {
             return "pause.circle.fill"
         }
@@ -461,6 +467,9 @@ private struct SidebarSessionStatus: View {
     }
 
     private var statusColor: Color {
+        if session.statusMessage == AppText.stopping {
+            return .orange
+        }
         if session.isPaused {
             return .orange
         }

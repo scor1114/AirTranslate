@@ -63,6 +63,12 @@ enum AppText {
     )
     static let ready = localized(english: "Ready", korean: "준비됨", japanese: "準備完了", chineseSimplified: "就绪")
     static let stopped = localized(english: "Stopped", korean: "중지됨", japanese: "停止中", chineseSimplified: "已停止")
+    static let stopping = localized(
+        english: "Stopping… Press Stop again to finish immediately.",
+        korean: "정지 중… 즉시 종료하려면 중지를 한 번 더 누르세요.",
+        japanese: "停止中…すぐに終了するには、もう一度停止を押してください。",
+        chineseSimplified: "正在停止…再次按停止可立即结束。"
+    )
     static let paused = localized(english: "Paused", korean: "일시정지됨", japanese: "一時停止中", chineseSimplified: "已暂停")
     static let capture = localized(english: "Capture", korean: "캡처", japanese: "キャプチャ", chineseSimplified: "捕获")
     static let start = localized(english: "Start", korean: "시작", japanese: "開始", chineseSimplified: "开始")
@@ -620,6 +626,12 @@ enum AppText {
         localized(
             english: "The recording was saved separately as \(fileName).",
             korean: "녹음 파일이 \(fileName)(으)로 별도 저장되었습니다."
+        )
+    }
+    static func audioRecordingDroppedChunks(_ count: Int) -> String {
+        localized(
+            english: "The audio encoder fell behind, so \(count) recording chunks were omitted.",
+            korean: "오디오 인코더가 입력을 따라가지 못해 녹음 구간 \(count)개가 누락되었습니다."
         )
     }
     static let copy = localized(english: "Copy", korean: "복사")

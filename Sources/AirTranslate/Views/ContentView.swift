@@ -126,6 +126,9 @@ struct ContentView: View {
     }
 
     private var captureStateDescription: String {
+        if session.statusMessage == AppText.stopping {
+            return AppText.stopping
+        }
         if session.isStarting {
             return AppText.startingCapture(for: session.audioInputSource)
         }

@@ -54,6 +54,7 @@ private struct CaptureCommands: Commands {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var session: TranslationSessionStore?
+    private var terminationTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let appIcon = NSImage(named: "AppIcon") {
@@ -63,7 +64,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        session?.prepareForTermination()
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let session else { return .terminateNow }
+        guard terminationTask == nil else { return .terminateLater }
+
+        terminationTask = Task { @MainActor in
+            await session.prepareForTermination()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
