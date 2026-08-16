@@ -221,6 +221,36 @@ struct TranslationSessionStoreLanguageCandidateTests {
 
     @Test
     @MainActor
+    func recordingAssociationCollisionReportsPreservedSourceFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateRecordingCollisionTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let sourceURL = directory.appendingPathComponent("2026-08-16_10-00-00_microphone.m4a")
+        let destinationURL = directory.appendingPathComponent("Meeting.m4a")
+        try Data([1]).write(to: sourceURL)
+        try Data([2]).write(to: destinationURL)
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory
+        )
+
+        session.associateRecordingForTesting(
+            sourceURL,
+            withTranscriptBaseFileName: "Meeting.txt"
+        )
+
+        #expect(try Data(contentsOf: sourceURL) == Data([1]))
+        #expect(try Data(contentsOf: destinationURL) == Data([2]))
+        #expect(
+            session.statusMessage
+                == AppText.audioRecordingSavedSeparately(sourceURL.lastPathComponent)
+        )
+    }
+
+    @Test
+    @MainActor
     func deletingAllSavedTranscriptsAlsoDeletesOrphanedRecordings() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AirTranslateDeleteAllTests-\(UUID().uuidString)", isDirectory: true)
@@ -324,6 +354,45 @@ struct TranslationSessionStoreLanguageCandidateTests {
         #expect(FileManager.default.fileExists(atPath: activeURL.path))
         #expect(!FileManager.default.fileExists(atPath: removableTranscriptURL.path))
         #expect(!FileManager.default.fileExists(atPath: removableRecordingURL.path))
+        _ = await registry.beginClear().value
+    }
+
+    @Test
+    @MainActor
+    func deletingActiveRecordingShowsBlockedToast() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateActiveRecordingToastTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writer = AudioRecordingWriter(
+            directoryURL: directory,
+            inputSource: .microphone,
+            startedAt: Date(timeIntervalSince1970: 0)
+        )
+        try writer.appendPCM16(Data(count: 16_000 * MemoryLayout<Int16>.size), sampleRate: 16_000)
+        let activeURL = try #require(writer.fileURL)
+        let registry = AudioSamplePipelineRegistry()
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory,
+            audioSamplePipelineRegistry: registry
+        )
+        let recording = try #require(session.savedTranscripts.first)
+        session.selectSavedTranscript(recording.id)
+        registry.publish(
+            generation: 1,
+            transcriber: LiveSpeechTranscriber(),
+            openAITranscriber: OpenAIRealtimeTranscriber(),
+            geminiLiveTranslator: GeminiLiveTranslationService(),
+            recordingWriter: writer,
+            recordingFailure: { _ in }
+        )
+
+        session.deleteSelectedTranscript()
+
+        #expect(FileManager.default.fileExists(atPath: activeURL.path))
+        #expect(session.toastMessage == AppText.activeRecordingCannotBeDeleted)
         _ = await registry.beginClear().value
     }
 

@@ -94,6 +94,21 @@ private actor SuspendedCaptureStop {
     }
 }
 
+private actor SuspendedTranscriptionFinalizer {
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private(set) var didStart = false
+
+    func finish() async -> Bool {
+        didStart = true
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func resume(returning result: Bool) {
+        continuation?.resume(returning: result)
+        continuation = nil
+    }
+}
+
 @Suite(.serialized)
 struct GPTLiveTranscriptionModeTests {
     @Test
@@ -720,6 +735,64 @@ struct GPTLiveTranscriptionModeTests {
     }
 
     @Test
+    func recoverableCommitErrorPreservesNewUncommittedAudioAccounting() {
+        let transcriber = OpenAIRealtimeTranscriber()
+        let audioByteCount = OpenAIRealtimeTranscriber.minimumTranscriptionCommitAudioByteCount
+        transcriber.seedOutstandingTranscriptionCommitForTesting()
+        #expect(
+            transcriber.reserveAudioSendSlot(
+                audioByteCount: audioByteCount,
+                marksUncommittedTranscriptionAudio: true
+            )
+        )
+
+        transcriber.handleEventText(
+            #"{"type":"error","error":{"code":"input_audio_buffer_commit_empty"}}"#
+        )
+
+        #expect(transcriber.outstandingTranscriptionCommitCountForTesting == 0)
+        #expect(transcriber.uncommittedTranscriptionAudioByteCountForTesting == audioByteCount)
+        transcriber.releaseAudioSendSlot()
+    }
+
+    @Test
+    @MainActor
+    func finalizationUsesFreshAcknowledgementDeadlineAndSurfacesTimeout() async {
+        let transcriber = OpenAIRealtimeTranscriber()
+        transcriber.prepareTranscriptionFinalizationForTesting(pendingSendCount: 1)
+        transcriber.seedOutstandingTranscriptionCommitForTesting()
+
+        let providerEvents = Task {
+            try? await Task.sleep(for: .milliseconds(80))
+            transcriber.releaseAudioSendSlot()
+            try? await Task.sleep(for: .milliseconds(100))
+            transcriber.handleEventText(
+                #"{"type":"input_audio_buffer.committed","item_id":"final","previous_item_id":null}"#
+            )
+            transcriber.handleEventText(
+                #"{"type":"conversation.item.input_audio_transcription.completed","item_id":"final","transcript":"done"}"#
+            )
+        }
+
+        let didFinish = await transcriber.finishPendingTranscriptionAudioForTesting(
+            phaseTimeout: 0.15
+        )
+        await providerEvents.value
+        #expect(didFinish)
+        transcriber.stop()
+
+        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+        session.useGPTTranscriptionMode()
+        let pipeline = session.activateLiveCallbackPipelineForTesting()
+        pipeline.openAITranscriber.onFinishPendingTranscriptionAudioForTesting = { false }
+
+        session.stop()
+        await waitForSessionStop(session)
+
+        #expect(session.statusMessage == AppText.gptTranscriptionFinalizationTimedOut)
+    }
+
+    @Test
     @MainActor
     func openAIProxyFailureStopsTheMatchingStoreGeneration() async {
         let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
@@ -769,7 +842,7 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func storeStopFlushesLastTerminalBeforeTranscriptTeardown() {
+    func storeStopFlushesLastTerminalBeforeTranscriptTeardown() async {
         let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
         let pipeline = session.activateLiveCallbackPipelineForTesting()
 
@@ -777,6 +850,7 @@ struct GPTLiveTranscriptionModeTests {
             #"{"type":"conversation.item.input_audio_transcription.completed","item_id":"last","transcript":"Saved final caption"}"#
         )
         session.stop()
+        await waitForSessionStop(session)
 
         #expect(!session.isRunning)
         #expect(session.lines.contains(where: { $0.sourceText.contains("Saved final caption") }))
@@ -805,6 +879,79 @@ struct GPTLiveTranscriptionModeTests {
         #expect(!session.isRunning)
         #expect(session.statusMessage == AppText.stopped)
         await captureStop.resume()
+    }
+
+    @Test
+    @MainActor
+    func stoppingStateSpansOnlyDeferredStopFinalization() async {
+        let captureStop = SuspendedCaptureStop()
+        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+        session.useGPTTranscriptionMode()
+        _ = session.activateLiveCallbackPipelineForTesting()
+        session.setCaptureStopHandlerForTesting { await captureStop.stop() }
+
+        #expect(!session.isStopping)
+        session.stop()
+        for _ in 0..<100 where !(await captureStop.didStart) {
+            await Task.yield()
+        }
+
+        #expect(session.isStopping)
+        session.statusMessage = "intermediate status"
+        #expect(session.isStopping)
+
+        session.stop()
+        #expect(!session.isStopping)
+        await captureStop.resume()
+    }
+
+    @Test
+    @MainActor
+    func pausedGPTTranscriptsAreAcceptedOnlyDuringOneShotFlush() async {
+        let finalizer = SuspendedTranscriptionFinalizer()
+        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+        session.useGPTTranscriptionMode()
+        let pipeline = session.activateLiveCallbackPipelineForTesting()
+        pipeline.openAITranscriber.onFinishPendingTranscriptionAudioForTesting = {
+            await finalizer.finish()
+        }
+
+        session.pause()
+        for _ in 0..<100 where !(await finalizer.didStart) {
+            await Task.yield()
+        }
+        #expect(session.acceptsPausedGPTTranscriptionFlushForTesting)
+
+        pipeline.openAITranscriber.handleEventText(
+            #"{"type":"input_audio_buffer.committed","item_id":"flush","previous_item_id":null}"#
+        )
+        pipeline.openAITranscriber.handleEventText(
+            #"{"type":"conversation.item.input_audio_transcription.completed","item_id":"flush","transcript":"accepted flush"}"#
+        )
+        for _ in 0..<100 where !session.lines.contains(where: { $0.sourceText.contains("accepted flush") }) {
+            await Task.yield()
+        }
+        #expect(session.lines.contains(where: { $0.sourceText.contains("accepted flush") }))
+
+        await finalizer.resume(returning: true)
+        for _ in 0..<100 where session.acceptsPausedGPTTranscriptionFlushForTesting {
+            await Task.yield()
+        }
+        #expect(!session.acceptsPausedGPTTranscriptionFlushForTesting)
+
+        pipeline.openAITranscriber.handleEventText(
+            #"{"type":"input_audio_buffer.committed","item_id":"late","previous_item_id":"flush"}"#
+        )
+        pipeline.openAITranscriber.handleEventText(
+            #"{"type":"conversation.item.input_audio_transcription.completed","item_id":"late","transcript":"rejected late"}"#
+        )
+        await Task.yield()
+        await Task.yield()
+        #expect(!session.lines.contains(where: { $0.sourceText.contains("rejected late") }))
+
+        pipeline.openAITranscriber.onFinishPendingTranscriptionAudioForTesting = nil
+        session.stop()
+        await waitForSessionStop(session)
     }
 
     @Test

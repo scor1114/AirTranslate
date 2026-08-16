@@ -64,7 +64,10 @@ struct MenuBarStatusView: View {
                 IconPanelButtonLabel(
                     systemImage: capturePhase.actionSystemImage,
                     title: capturePhase.actionTitle,
-                    subtitle: capturePhase.actionSubtitle(statusMessage: session.statusMessage),
+                    subtitle: capturePhase.actionSubtitle(
+                        statusMessage: session.statusMessage,
+                        isStopping: session.isStopping
+                    ),
                     accentColor: captureActionColor,
                     isSelected: capturePhase == .idle
                 )
@@ -72,7 +75,12 @@ struct MenuBarStatusView: View {
             .buttonStyle(AirTranslatePressButtonStyle())
             .help(capturePhase.actionTitle)
             .accessibilityLabel(capturePhase.actionTitle)
-            .accessibilityValue(capturePhase.actionSubtitle(statusMessage: session.statusMessage))
+            .accessibilityValue(
+                capturePhase.actionSubtitle(
+                    statusMessage: session.statusMessage,
+                    isStopping: session.isStopping
+                )
+            )
 
             Button {
                 toggleFloatingCaptions()
@@ -336,14 +344,14 @@ enum MenuBarCapturePhase: Equatable {
         }
     }
 
-    func actionSubtitle(statusMessage: String) -> String {
+    func actionSubtitle(statusMessage: String, isStopping: Bool = false) -> String {
         switch self {
         case .idle:
             AppText.ready
         case .starting:
             statusMessage
         case .running:
-            statusMessage == AppText.stopping ? statusMessage : AppText.menuBarRunningTitle
+            isStopping ? statusMessage : AppText.menuBarRunningTitle
         case .paused:
             AppText.paused
         }

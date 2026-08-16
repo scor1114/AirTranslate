@@ -126,7 +126,7 @@ struct ContentView: View {
     }
 
     private var captureStateDescription: String {
-        if session.statusMessage == AppText.stopping {
+        if session.isStopping {
             return AppText.stopping
         }
         if session.isStarting {

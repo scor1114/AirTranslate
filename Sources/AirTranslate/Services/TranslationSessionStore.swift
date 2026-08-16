@@ -544,6 +544,7 @@ final class TranslationSessionStore {
     var isRunning = false
     var isStarting = false
     var isPaused = false
+    private(set) var isStopping = false
     var isDubbingEnabled = false {
         didSet {
             if !isApplyingVoiceOutputDefault {
@@ -799,6 +800,9 @@ final class TranslationSessionStore {
     private var captureStopTask: Task<Void, Never>?
     private var recordingFinalizationTask: Task<Void, Never>?
     private var gptTranscriptionStopTask: Task<Void, Never>?
+    private var gptTranscriptionPauseFlushTask: Task<Void, Never>?
+    private var gptTranscriptionPauseFlushGeneration: UInt64 = 0
+    private var acceptsPausedGPTTranscriptionFlush = false
     private var pipelineLifecycle = PipelineLifecycleState()
     private var activeCaptionerGeneration: UInt64?
     private var dubbingSpeechProgress = DubbingSpeechProgress()
@@ -947,6 +951,7 @@ final class TranslationSessionStore {
         }
 
         invalidateCaptureStartAttempt()
+        isStopping = false
         activeRecordingTranscriptBaseFileName = nil
         let configuration = currentStartConfiguration()
         let generation = pipelineLifecycle.beginStart(configuration: configuration)
@@ -1061,10 +1066,13 @@ final class TranslationSessionStore {
         if let gptTranscriptionStopTask {
             gptTranscriptionStopTask.cancel()
             self.gptTranscriptionStopTask = nil
+            cancelGPTTranscriptionPauseFlush()
             finishPipeline(statusOverride: nil)
             return
         }
         guard isRunning || isStarting else { return }
+        isStopping = true
+        cancelGPTTranscriptionPauseFlush()
         pipelineLifecycle.stop()
         if isRunning, isUsingGPTTranscriptionMode {
             statusMessage = AppText.stopping
@@ -1074,14 +1082,19 @@ final class TranslationSessionStore {
             gptTranscriptionStopTask = Task { @MainActor [weak self] in
                 await captureStopTask.value
                 guard !Task.isCancelled else { return }
-                _ = await transcriberToFinish.finishPendingTranscriptionAudio()
+                let didFinishTranscription = await transcriberToFinish
+                    .finishPendingTranscriptionAudio()
                 guard let self,
                       !Task.isCancelled,
                       self.gptTranscriptionStopTask != nil,
                       self.openAITranscriber === transcriberToFinish
                 else { return }
                 self.gptTranscriptionStopTask = nil
-                self.finishPipeline(statusOverride: nil)
+                self.finishPipeline(
+                    statusOverride: didFinishTranscription
+                        ? nil
+                        : AppText.gptTranscriptionFinalizationTimedOut
+                )
             }
             return
         }
@@ -1089,6 +1102,8 @@ final class TranslationSessionStore {
     }
 
     private func finishPipeline(statusOverride: String?) {
+        isStopping = false
+        cancelGPTTranscriptionPauseFlush()
         gptTranscriptionStopTask?.cancel()
         gptTranscriptionStopTask = nil
         invalidateCaptureStartAttempt()
@@ -1327,7 +1342,6 @@ final class TranslationSessionStore {
         guard isRunning, !isPaused, gptTranscriptionStopTask == nil else { return }
 
         if isUsingGPTTranscriptionMode {
-            openAITranscriber.commitTranscriptionAudio()
             realtimeTranscriptionTurnBoundary.reset()
         }
         flushPendingRecognizedCaption()
@@ -1341,10 +1355,14 @@ final class TranslationSessionStore {
         stopSpeaking()
         isPaused = true
         statusMessage = AppText.paused
+        if isUsingGPTTranscriptionMode {
+            beginGPTTranscriptionPauseFlush()
+        }
     }
 
     func resume() {
         guard isRunning, isPaused else { return }
+        cancelGPTTranscriptionPauseFlush()
         pendingAutoDetectionLanguageChange = nil
 
         setCaptionersPaused(false)
@@ -1399,6 +1417,7 @@ final class TranslationSessionStore {
     }
 
     func prepareForTermination() async {
+        cancelGPTTranscriptionPauseFlush()
         autoStartAfterModelAssetDownloadTask?.cancel()
         cancelTranslationSessionWarmup()
         transcriptCheckpointTask?.cancel()
@@ -2009,6 +2028,7 @@ final class TranslationSessionStore {
 
         if let recordingURL = associatedRecordingURL(for: selectedTranscript),
            isActiveRecordingFile(recordingURL) {
+            showToast(AppText.activeRecordingCannotBeDeleted)
             loadSavedTranscripts()
             return
         }
@@ -2280,6 +2300,33 @@ final class TranslationSessionStore {
         transcriber.setPaused(isPaused)
         openAITranscriber.setPaused(isPaused)
         geminiLiveTranslator.setPaused(isPaused)
+    }
+
+    private func beginGPTTranscriptionPauseFlush() {
+        cancelGPTTranscriptionPauseFlush()
+        acceptsPausedGPTTranscriptionFlush = true
+        let generation = gptTranscriptionPauseFlushGeneration
+        let transcriberToFinish = openAITranscriber
+
+        gptTranscriptionPauseFlushTask = Task { @MainActor [weak self] in
+            _ = await transcriberToFinish.finishPendingTranscriptionAudio()
+            guard let self,
+                  self.gptTranscriptionPauseFlushGeneration == generation,
+                  self.openAITranscriber === transcriberToFinish,
+                  self.isRunning,
+                  self.isPaused
+            else { return }
+            self.flushOpenAITerminalTranscriptMailbox()
+            self.acceptsPausedGPTTranscriptionFlush = false
+            self.gptTranscriptionPauseFlushTask = nil
+        }
+    }
+
+    private func cancelGPTTranscriptionPauseFlush() {
+        gptTranscriptionPauseFlushGeneration &+= 1
+        gptTranscriptionPauseFlushTask?.cancel()
+        gptTranscriptionPauseFlushTask = nil
+        acceptsPausedGPTTranscriptionFlush = false
     }
 
     private func resetLiveSessionState(clearsVisibleLines: Bool) {
@@ -3040,7 +3087,7 @@ final class TranslationSessionStore {
         confidence: Double,
         isFinal: Bool
     ) {
-        guard isRunning, !isPaused || isUsingGPTTranscriptionMode else { return }
+        guard isRunning, !isPaused || acceptsPausedGPTTranscriptionFlush else { return }
         guard sourceText != lastRecognizedText || isFinal != lastRecognizedWasFinal else { return }
 
         let now = Date()
@@ -4902,6 +4949,17 @@ final class TranslationSessionStore {
         _ handler: (@Sendable () async -> Void)?
     ) {
         captureStopHandlerForTesting = handler
+    }
+
+    var acceptsPausedGPTTranscriptionFlushForTesting: Bool {
+        acceptsPausedGPTTranscriptionFlush
+    }
+
+    func associateRecordingForTesting(
+        _ recordingURL: URL,
+        withTranscriptBaseFileName fileName: String
+    ) {
+        associateRecording(recordingURL, withTranscriptBaseFileName: fileName)
     }
 
     func warmTranslationSessionForTesting() {

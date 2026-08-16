@@ -123,6 +123,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     private var realtimeTranscriptsQueuedForDeliveryHook: (() -> Void)?
     private var realtimeEventValidatedBeforeMutationHook: (() -> Void)?
     private var realtimeTimelineMutationValidatedHook: (() -> Void)?
+    private var finishPendingTranscriptionAudioHook: (@Sendable () async -> Bool)?
     #endif
     private let realtimeTranslationInputPublishThrottle = RealtimeTranscriptPublishThrottle(
         publishInterval: OpenAIRealtimeTranscriber.realtimeTranscriptPublishInterval
@@ -356,6 +357,17 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
 
     @discardableResult
     func finishPendingTranscriptionAudio() async -> Bool {
+        #if DEBUG
+        if let hook = stateLock.withLock({ finishPendingTranscriptionAudioHook }) {
+            return await hook()
+        }
+        #endif
+        return await finishPendingTranscriptionAudio(
+            phaseTimeout: Self.transcriptionFinalizationTimeout
+        )
+    }
+
+    private func finishPendingTranscriptionAudio(phaseTimeout: TimeInterval) async -> Bool {
         guard let context = stateLock.withLock({ () -> (UInt64, Set<UInt64>)? in
             guard outputMode == .transcription, webSocketTask != nil else { return nil }
             isPaused = true
@@ -367,8 +379,8 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         let generation = context.0
         var commitIDsToFinish = context.1
 
-        let deadline = Date().addingTimeInterval(Self.transcriptionFinalizationTimeout)
-        while Date() < deadline {
+        let sendDeadline = Date().addingTimeInterval(phaseTimeout)
+        while Date() < sendDeadline {
             let sendsFinished = stateLock.withLock {
                 connectionGeneration != generation || pendingAudioSendCount == 0
             }
@@ -390,7 +402,8 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         }
         sendTranscriptionCommit(request)
 
-        while Date() < deadline {
+        let acknowledgementDeadline = Date().addingTimeInterval(phaseTimeout)
+        while Date() < acknowledgementDeadline {
             let isFinished = stateLock.withLock {
                 connectionGeneration != generation
                     || outstandingTranscriptionCommitIDs.isDisjoint(with: commitIDsToFinish)
@@ -585,10 +598,21 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             hasUncommittedTranscriptionAudio = false
             uncommittedTranscriptionAudioByteCount = 0
             isTranscriptionCommitPending = false
-            transcriptionCommitIDsAwaitingAcknowledgement.removeAll()
-            transcriptionCommitIDByItemID.removeAll()
-            outstandingTranscriptionCommitIDs.removeAll()
+            clearOutstandingTranscriptionCommitWaitsLocked()
         }
+    }
+
+    private func clearOutstandingTranscriptionCommitWaits(generation: UInt64) {
+        stateLock.withLock {
+            guard connectionGeneration == generation else { return }
+            clearOutstandingTranscriptionCommitWaitsLocked()
+        }
+    }
+
+    private func clearOutstandingTranscriptionCommitWaitsLocked() {
+        transcriptionCommitIDsAwaitingAcknowledgement.removeAll()
+        transcriptionCommitIDByItemID.removeAll()
+        outstandingTranscriptionCommitIDs.removeAll()
     }
 
     private func acknowledgeTranscriptionCommit(itemID: String, generation: UInt64) {
@@ -889,10 +913,12 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                   !delta.isEmpty else { return }
             publishOutputAudioIfCurrent(delta, generation: generation)
         case "error":
+            if outputMode == .transcription,
+               Self.isRecoverableTranscriptionCommitError(event.error) {
+                clearOutstandingTranscriptionCommitWaits(generation: generation)
+                return
+            }
             failOutstandingTranscriptionCommits(generation: generation)
-            guard outputMode != .transcription
-                    || !Self.isRecoverableTranscriptionCommitError(event.error)
-            else { return }
             publishFailureIfCurrent(
                 OpenAIRealtimeTranscriberError.connectionFailed,
                 generation: generation
@@ -1619,6 +1645,29 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
 
     var outstandingTranscriptionCommitCountForTesting: Int {
         stateLock.withLock { outstandingTranscriptionCommitIDs.count }
+    }
+
+    var uncommittedTranscriptionAudioByteCountForTesting: Int {
+        stateLock.withLock { uncommittedTranscriptionAudioByteCount }
+    }
+
+    var onFinishPendingTranscriptionAudioForTesting: (@Sendable () async -> Bool)? {
+        get { stateLock.withLock { finishPendingTranscriptionAudioHook } }
+        set { stateLock.withLock { finishPendingTranscriptionAudioHook = newValue } }
+    }
+
+    func prepareTranscriptionFinalizationForTesting(pendingSendCount: Int) {
+        let task = URLSession.shared.webSocketTask(
+            with: URL(string: "wss://localhost.invalid/realtime")!
+        )
+        stateLock.withLock {
+            webSocketTask = task
+            pendingAudioSendCount = max(0, pendingSendCount)
+        }
+    }
+
+    func finishPendingTranscriptionAudioForTesting(phaseTimeout: TimeInterval) async -> Bool {
+        await finishPendingTranscriptionAudio(phaseTimeout: phaseTimeout)
     }
 
     func seedOutstandingTranscriptionCommitForTesting() {

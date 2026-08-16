@@ -69,6 +69,12 @@ enum AppText {
         japanese: "停止中…すぐに終了するには、もう一度停止を押してください。",
         chineseSimplified: "正在停止…再次按停止可立即结束。"
     )
+    static let gptTranscriptionFinalizationTimedOut = localized(
+        english: "GPT transcription stopped before finalization completed. The last utterance may be missing.",
+        korean: "GPT 전사 마무리가 완료되기 전에 정지되었습니다. 마지막 발화가 누락되었을 수 있습니다.",
+        japanese: "GPT文字起こしの完了前に停止しました。最後の発話が欠けている可能性があります。",
+        chineseSimplified: "GPT 转写在完成收尾前已停止，最后一段发言可能缺失。"
+    )
     static let paused = localized(english: "Paused", korean: "일시정지됨", japanese: "一時停止中", chineseSimplified: "已暂停")
     static let capture = localized(english: "Capture", korean: "캡처", japanese: "キャプチャ", chineseSimplified: "捕获")
     static let start = localized(english: "Start", korean: "시작", japanese: "開始", chineseSimplified: "开始")
@@ -598,6 +604,12 @@ enum AppText {
         korean: "이 저장 기록과 녹음 파일을 함께 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
         japanese: "この保存済み文字起こしと音声録音を削除しますか？この操作は取り消せません。",
         chineseSimplified: "要删除这份已保存的转写记录及其录音吗？此操作无法撤销。"
+    )
+    static let activeRecordingCannotBeDeleted = localized(
+        english: "This recording is still in progress and cannot be deleted.",
+        korean: "현재 녹음 중인 파일은 삭제할 수 없습니다.",
+        japanese: "現在録音中のファイルは削除できません。",
+        chineseSimplified: "当前正在录音，无法删除此文件。"
     )
     static let translation = localized(english: "Translation", korean: "번역")
     static let translationDescription = localized(
