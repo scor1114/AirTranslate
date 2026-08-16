@@ -775,10 +775,10 @@ final class TranslationSessionStore {
     private var translationSegmentCache = TranslationSegmentCache(
         capacity: TranslationSessionStore.maxTranslationCacheEntries
     )
-    private var realtimeTranslationSourceText = ""
-    private var realtimeTranslationOnlyText = ""
-    private var geminiLiveInputTranscriptText = ""
-    private var geminiLiveOutputTranscriptText = ""
+    private var realtimeTranslationSource = RealtimeTranscriptAccumulator()
+    private var realtimeTranslationOutput = RealtimeTranscriptAccumulator()
+    private var geminiLiveInputTranscript = RealtimeTranscriptAccumulator()
+    private var geminiLiveOutputTranscript = RealtimeTranscriptAccumulator()
     private var activeAutosaveSourceText = ""
     private var activeAutosaveTranslatedText = ""
     private var activeAutosaveBaseFileName: String?
@@ -2376,10 +2376,10 @@ final class TranslationSessionStore {
             clearPendingTranslationPlaceholders(message: AppText.translationCancelled)
         }
         resetTranslationCache()
-        realtimeTranslationSourceText = ""
-        realtimeTranslationOnlyText = ""
-        geminiLiveInputTranscriptText = ""
-        geminiLiveOutputTranscriptText = ""
+        realtimeTranslationSource.reset()
+        realtimeTranslationOutput.reset()
+        geminiLiveInputTranscript.reset()
+        geminiLiveOutputTranscript.reset()
         activeAutosaveSourceText = ""
         activeAutosaveTranslatedText = ""
         activeAutosaveBaseFileName = nil
@@ -4260,12 +4260,9 @@ final class TranslationSessionStore {
         guard isUsingOpenAIRealtimeTranslation else { return }
 
         guard text.rangeOfCharacter(from: .whitespacesAndNewlines.inverted) != nil
-            || !realtimeTranslationSourceText.isEmpty else { return }
+            || !realtimeTranslationSource.text.isEmpty else { return }
 
-        realtimeTranslationSourceText = accumulatedRealtimeText(
-            current: realtimeTranslationSourceText,
-            next: text
-        )
+        realtimeTranslationSource.append(text, languageID: sourceLanguage.id)
         refreshOpenAIRealtimeTranslationLine()
     }
 
@@ -4274,18 +4271,15 @@ final class TranslationSessionStore {
         guard isUsingOpenAIRealtimeTranslation else { return }
 
         guard text.rangeOfCharacter(from: .whitespacesAndNewlines.inverted) != nil
-            || !realtimeTranslationOnlyText.isEmpty else { return }
+            || !realtimeTranslationOutput.text.isEmpty else { return }
 
-        realtimeTranslationOnlyText = accumulatedRealtimeText(
-            current: realtimeTranslationOnlyText,
-            next: text
-        )
+        realtimeTranslationOutput.append(text, languageID: targetLanguage.id)
         refreshOpenAIRealtimeTranslationLine()
     }
 
     private func refreshOpenAIRealtimeTranslationLine() {
-        let inputText = realtimeTranslationSourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let translatedText = realtimeTranslationOnlyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inputText = realtimeTranslationSource.text
+        let translatedText = realtimeTranslationOutput.text
         guard !inputText.isEmpty || !translatedText.isEmpty else { return }
 
         lastRecognizedText = inputText.isEmpty ? translatedText : inputText
@@ -4335,40 +4329,24 @@ final class TranslationSessionStore {
     private func updateGeminiLiveInputTranscript(_ text: String) {
         guard isRunning, !isPaused else { return }
         guard text.rangeOfCharacter(from: .whitespacesAndNewlines.inverted) != nil
-            || !geminiLiveInputTranscriptText.isEmpty else { return }
+            || !geminiLiveInputTranscript.text.isEmpty else { return }
 
-        geminiLiveInputTranscriptText = accumulatedRealtimeText(
-            current: geminiLiveInputTranscriptText,
-            next: text
-        )
+        geminiLiveInputTranscript.append(text, languageID: sourceLanguage.id)
         refreshGeminiLiveCaptionLine()
     }
 
     private func updateGeminiLiveOutputTranscript(_ text: String) {
         guard isRunning, !isPaused else { return }
         guard text.rangeOfCharacter(from: .whitespacesAndNewlines.inverted) != nil
-            || !geminiLiveOutputTranscriptText.isEmpty else { return }
+            || !geminiLiveOutputTranscript.text.isEmpty else { return }
 
-        geminiLiveOutputTranscriptText = accumulatedRealtimeText(
-            current: geminiLiveOutputTranscriptText,
-            next: text
-        )
+        geminiLiveOutputTranscript.append(text, languageID: targetLanguage.id)
         refreshGeminiLiveCaptionLine()
     }
 
-    private func accumulatedRealtimeText(current: String, next: String) -> String {
-        if next.hasPrefix(current) {
-            return next
-        }
-        if current.hasSuffix(next) {
-            return current
-        }
-        return current + next
-    }
-
     private func refreshGeminiLiveCaptionLine() {
-        let inputText = geminiLiveInputTranscriptText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let outputText = geminiLiveOutputTranscriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inputText = geminiLiveInputTranscript.text
+        let outputText = geminiLiveOutputTranscript.text
         guard !inputText.isEmpty || !outputText.isEmpty else { return }
 
         lastRecognizedText = inputText.isEmpty ? outputText : inputText

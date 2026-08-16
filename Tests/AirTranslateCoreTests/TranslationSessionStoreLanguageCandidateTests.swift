@@ -609,6 +609,13 @@ struct TranslationSessionStoreLanguageCandidateTests {
 
         session.liveSpeechTranscriber(
             transcriber,
+            didRecognizeSourceTranscript: "Hello from",
+            confidence: 0.5
+        )
+        await Task.yield()
+
+        session.liveSpeechTranscriber(
+            transcriber,
             didRecognizeSourceTranscript: "Hello from the source audio.",
             confidence: 0.5
         )
@@ -619,14 +626,38 @@ struct TranslationSessionStoreLanguageCandidateTests {
 
         session.liveSpeechTranscriber(
             transcriber,
-            didTranslate: "원본 오디오에서 안녕하세요.",
+            didTranslate: "이것들은 구매해서",
+            language: .korean,
+            confidence: 0.5
+        )
+        await Task.yield()
+
+        session.liveSpeechTranscriber(
+            transcriber,
+            didTranslate: "이것들은 구매해서 여러 사이트로 배송되고",
+            language: .korean,
+            confidence: 0.5
+        )
+        await Task.yield()
+
+        session.liveSpeechTranscriber(
+            transcriber,
+            didTranslate: "거기서 안전성과 효능성 연구에 쓰입니다",
+            language: .korean,
+            confidence: 0.5
+        )
+        await Task.yield()
+
+        session.liveSpeechTranscriber(
+            transcriber,
+            didTranslate: "그리고 같은 배치의 세포가 환자에게도 사용됐습니다",
             language: .korean,
             confidence: 0.5
         )
         await Task.yield()
 
         #expect(session.lines.first?.sourceText == "Hello from the source audio.")
-        #expect(session.lines.first?.translatedText == "원본 오디오에서 안녕하세요.")
+        #expect(session.lines.first?.translatedText == "이것들은 구매해서 여러 사이트로 배송되고 거기서 안전성과 효능성 연구에 쓰입니다. 그리고 같은 배치의 세포가 환자에게도 사용됐습니다")
     }
 
     @Test
