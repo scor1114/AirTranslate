@@ -1,6 +1,6 @@
 # AirTranslate 1.6.0
 
-AirTranslate 1.6.0 adds optional audio recording alongside live transcription and translation, reworks how the OpenAI Realtime transcription path stops a session, and fixes missing spacing between live translation turns.
+AirTranslate 1.6.0 adds optional audio recording alongside live transcription and translation, reworks how the OpenAI Realtime transcription path stops a session, and fixes missing spacing between live translation turns in the GPT realtime translation paths.
 
 AirTranslate is an independent open-source project and is not affiliated with Apple, OpenAI, or Google.
 
@@ -34,7 +34,7 @@ AirTranslate is an independent open-source project and is not affiliated with Ap
 
 - Apple Mode remains the default local-first transcription and translation path.
 - GPT Realtime, GPT Transcription, and Gemini Live remain opt-in and continue to require user-provided API keys where applicable.
-- **Recordings are written only to your local transcript folder.** This release adds local audio files; it does not upload recordings, broaden the app's data collection, or add a backend account system.
+- **Saved recordings stay on your Mac.** The `.m4a` files this release adds are written only to your local transcript folder and are never uploaded. This does not change how the API-backed modes work: GPT and Gemini modes still stream live capture audio to the provider you selected, exactly as before.
 - This release does not change the existing ad-hoc signing and non-notarized distribution status.
 
 ## Verification

@@ -7,11 +7,9 @@ Live system-audio transcription and translation for macOS.
 <p align="center">
   <a href="https://github.com/scor1114/AirTranslate/releases/latest/download/AirTranslate.dmg"><img alt="Download AirTranslate.dmg" src="https://img.shields.io/badge/Download-AirTranslate.dmg-2EA44F?style=for-the-badge&logo=apple&logoColor=white"></a>
   <a href="https://github.com/scor1114/AirTranslate/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/scor1114/AirTranslate?style=for-the-badge&label=Latest"></a>
-  <a href="https://himomohi.github.io/AirTranslate/"><img alt="Official guide site" src="https://img.shields.io/badge/Guide-Site-0A84FF?style=for-the-badge"></a>
 </p>
 
 <p align="center">
-  <a href="https://himomohi.github.io/AirTranslate/">Guide Site</a> ·
   <a href="#download">Download</a> ·
   <a href="#requirements">Requirements</a> ·
   <a href="#privacy-and-api-keys">Privacy</a> ·
@@ -28,8 +26,6 @@ Live system-audio transcription and translation for macOS.
 </p>
 
 AirTranslate captures audio playing on your Mac, turns it into a live transcript, translates it in real time, and can show the result as a floating caption overlay. It is designed for meetings, lectures, videos, interviews, and streams where routing audio through a microphone is awkward or lossy.
-
-For a user-facing overview, setup guide, and download path, visit the [AirTranslate Guide Site](https://himomohi.github.io/AirTranslate/).
 
 The default workflow uses Apple frameworks. GPT Realtime and Gemini Live Translate are optional API-backed modes and can be enabled from the app only after you provide the matching API key.
 
@@ -49,11 +45,11 @@ The default workflow uses Apple frameworks. GPT Realtime and Gemini Live Transla
 
 ## What's New in 1.6.0
 
-- **Optional audio recording, enabled by default:** While capture runs, the microphone or Mac audio is also saved as a compressed `.m4a` beside your transcripts. Turn it off with the **Save audio file** checkbox on the main screen; recordings never leave your Mac.
+- **Optional audio recording, enabled by default:** While capture runs, the microphone or Mac audio is also saved as a compressed `.m4a` beside your transcripts. Turn it off with the **Save audio file** checkbox on the main screen. Saved `.m4a` files stay on your Mac; API-backed modes still stream live audio to the provider you selected.
 - **Recording-aware transcript library:** Recordings without transcript text appear as audio-only rows, deleting a transcript removes its paired recording, and the recording currently being written is protected from deletion.
 - **More reliable GPT Live Transcribe:** Turn boundaries are driven by the app, audio is committed after 15 seconds regardless of input level, and an empty-commit rejection is recoverable instead of fatal.
 - **Better stop behavior:** Stop shows a Stopping state, begins capture shutdown before draining transcription, and a second press ends the session immediately.
-- **Live translation spacing fixed:** Provider turns are joined on segment boundaries, so translated text no longer runs together as `배송되고거기서`.
+- **Live translation spacing fixed (GPT realtime translation):** Provider turns are joined on segment boundaries, so translated text no longer runs together as `배송되고거기서`. Gemini Live keeps its previous joining.
 
 See the complete [AirTranslate 1.6.0 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.6.0).
 
@@ -64,7 +60,7 @@ See the complete [AirTranslate 1.6.0 release notes](https://github.com/scor1114/
 - **More reliable settings controls:** Voice volume follows the voice-output state, API-key persistence uses one session-store path, startup checks Keychain presence without reading secret data or showing authentication UI, and floating-caption previews follow the selected display mode.
 - **Keyboard and accessibility:** Settings preserve section identity while navigating, provide clearer accessibility labels and values, and respect Reduce Motion.
 
-See the complete [AirTranslate 1.5.1 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.5.1).
+See the complete [AirTranslate 1.5.1 release notes](https://github.com/himomohi/AirTranslate/releases/tag/v1.5.1).
 
 ## What's New in 1.5.0
 
@@ -73,14 +69,14 @@ See the complete [AirTranslate 1.5.1 release notes](https://github.com/scor1114/
 - **No silent speech-input loss:** audio backpressure becomes a visible controlled stop instead of silently dropping input.
 - **Optional GPT Transcription:** choose `gpt-live-transcribe` for source-only captions only when you provide an OpenAI API key; it is separate from GPT live translation.
 
-See the complete [AirTranslate 1.5.0 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.5.0).
+See the complete [AirTranslate 1.5.0 release notes](https://github.com/himomohi/AirTranslate/releases/tag/v1.5.0).
 
 ## What's New in 1.4.2
 
 - **Reliable microphone permission prompt:** signed local and release builds now embed the macOS microphone audio-input entitlement required for permission requests.
 - **Release-signing guard:** packaging checks verify Hardened Runtime, the release/debug entitlement split, and the microphone permission description before distribution.
 
-See the complete [AirTranslate 1.4.2 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.4.2).
+See the complete [AirTranslate 1.4.2 release notes](https://github.com/himomohi/AirTranslate/releases/tag/v1.4.2).
 
 ## What's New in 1.4.1
 
@@ -91,7 +87,7 @@ See the complete [AirTranslate 1.4.2 release notes](https://github.com/scor1114/
 - **Legitimate repeats preserved:** repeated phrases can still be spoken later in a session after the short replay window expires.
 - **Focused regression coverage:** the translated-speech progress logic is covered by dedicated AirTranslateCore tests.
 
-See the complete [AirTranslate 1.4.1 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.4.1).
+See the complete [AirTranslate 1.4.1 release notes](https://github.com/himomohi/AirTranslate/releases/tag/v1.4.1).
 
 ## Core Features
 
