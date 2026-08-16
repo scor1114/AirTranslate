@@ -1,5 +1,30 @@
 # AirTranslate Version History
 
+## 1.6.0 - 2026-08-16
+
+### Added
+
+- Optional audio recording alongside transcription and translation, enabled by default, saved as a compressed `.m4a` beside the transcript files and switchable from the main screen.
+- Audio-only transcript library rows for recordings saved without transcript text, plus recording-aware deletion in both the per-item and Delete All paths.
+- A Stopping state for GPT transcription shutdown, with a second Stop press ending the session immediately.
+
+### Changed
+
+- GPT Live Transcribe drives turn boundaries from the client instead of server voice-activity detection and uses the higher-accuracy delay setting.
+- Recording AAC encoding moved off the capture callback and the shared pipeline lock to a dedicated serial queue bounded at 32 pending buffers, with dropped chunks and bytes reported.
+- Stop begins capture shutdown before waiting for transcription finalization.
+- Deferred-stop is modeled as store-owned state rather than a localized status-string comparison.
+
+### Fixed
+
+- A sample-buffer failure after audio has been written preserves the recording instead of deleting it.
+- The recording currently being written is protected from deletion.
+- A byte-based commit fallback commits GPT Live Transcribe audio after 15 seconds regardless of the measured input level.
+- A rejected empty audio commit is recoverable, and commits carrying less than 100 ms of audio are no longer sent.
+- Paused GPT transcript acceptance is bounded to a single flush.
+- Live translation joins provider turns on segment boundaries, fixing run-together output such as `배송되고거기서`. GPT realtime translation paths only; the Gemini paths keep their previous joining.
+- The recording is finalized before the app exits.
+
 ## 1.5.1 - 2026-08-09
 
 ### Added

@@ -5,8 +5,8 @@
 macOS向けのリアルタイム・システム音声文字起こし/翻訳アプリ。
 
 <p align="center">
-  <a href="https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg"><img alt="Download AirTranslate.dmg" src="https://img.shields.io/badge/Download-AirTranslate.dmg-2EA44F?style=for-the-badge&logo=apple&logoColor=white"></a>
-  <a href="https://github.com/himomohi/AirTranslate/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/himomohi/AirTranslate?style=for-the-badge&label=Latest"></a>
+  <a href="https://github.com/scor1114/AirTranslate/releases/latest/download/AirTranslate.dmg"><img alt="Download AirTranslate.dmg" src="https://img.shields.io/badge/Download-AirTranslate.dmg-2EA44F?style=for-the-badge&logo=apple&logoColor=white"></a>
+  <a href="https://github.com/scor1114/AirTranslate/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/scor1114/AirTranslate?style=for-the-badge&label=Latest"></a>
   <a href="https://himomohi.github.io/AirTranslate/"><img alt="Official guide site" src="https://img.shields.io/badge/Guide-Site-0A84FF?style=for-the-badge"></a>
 </p>
 
@@ -47,6 +47,16 @@ AirTranslateは、Macで再生されている音声をリアルタイムで文�
 
 > "Turn any Mac audio into live captions and translation, right where you are watching."
 
+## 1.6.0の主な変更点
+
+- **任意の録音、既定で有効:** キャプチャ中にマイクまたはMacのオーディオを、記録ファイルと同じフォルダに圧縮`.m4a`として保存します。メイン画面の**録音ファイルを保存**チェックボックスで無効にできます。録音がMacの外に出ることはありません。
+- **録音に対応した記録ライブラリ:** 文字起こしのない録音も一覧に表示され、記録を削除すると対になる録音も削除され、録音中のファイルは削除から保護されます。
+- **より安定したGPT Live Transcribe:** 発話区切りの判定をアプリ側で行い、入力レベルに関係なく15秒ごとに音声をコミットし、空コミットの拒否を致命的エラーではなく回復可能な状況として扱います。
+- **停止動作の改善:** 停止時に「停止中」状態を表示し、文字起こしの完了を待つ前にキャプチャを停止します。もう一度押すと即座に終了します。
+- **翻訳文の区切り修正:** プロバイダのターンを区切り境界で結合し、`배송되고거기서`のようにつながって表示される問題を解消しました。
+
+詳細は[AirTranslate 1.6.0リリースノート](https://github.com/scor1114/AirTranslate/releases/tag/v1.6.0)をご覧ください。
+
 ## 1.5.1の主な変更点
 
 - **ミニマルで一貫したインターフェース:** メインワークスペース、サイドバー、メニューバー、フローティング字幕、記録ライブラリ、設定で、余白・アイコン・サーフェス・選択・ホバーの控えめなデザインシステムを共有します。
@@ -54,7 +64,7 @@ AirTranslateは、Macで再生されている音声をリアルタイムで文�
 - **設定操作の信頼性を向上:** 音量は音声出力の状態に連動し、APIキー保存はセッションストアの単一経路を使います。起動時は秘密データを読み取ったり認証UIを表示したりせずにKeychain内の存在だけを確認し、フローティング字幕のプレビューは選択中の表示モードと同期します。
 - **キーボードとアクセシビリティ:** 設定セクション移動時の選択状態を安定させ、アクセシビリティラベルと値を明確にし、「視差効果を減らす」設定に対応します。
 
-詳細は[AirTranslate 1.5.1リリースノート](https://github.com/himomohi/AirTranslate/releases/tag/v1.5.1)をご覧ください。
+詳細は[AirTranslate 1.5.1リリースノート](https://github.com/scor1114/AirTranslate/releases/tag/v1.5.1)をご覧ください。
 
 ## 1.5.0の主な変更点
 
@@ -63,14 +73,14 @@ AirTranslateは、Macで再生されている音声をリアルタイムで文�
 - **無音の入力欠落を防止:** 音声入力のbackpressureは黙って破棄せず、ユーザーに見える制御された停止として扱います。
 - **任意のGPT文字起こし:** OpenAI APIキーを指定した場合だけ、`gpt-live-transcribe`で原文字幕を作成できます。GPTライブ翻訳とは別のモードです。
 
-詳細は[AirTranslate 1.5.0リリースノート](https://github.com/himomohi/AirTranslate/releases/tag/v1.5.0)をご覧ください。
+詳細は[AirTranslate 1.5.0リリースノート](https://github.com/scor1114/AirTranslate/releases/tag/v1.5.0)をご覧ください。
 
 ## 1.4.2の主な変更点
 
 - **マイク権限の要求を安定化:** 署名済みのローカルおよびリリースビルドに、macOSのマイク権限要求に必要なaudio-inputエンタイトルメントを含めます。
 - **リリース署名の検証:** 配布前にHardened Runtime、リリース/デバッグ用エンタイトルメントの分離、マイク権限説明をパッケージング検査で確認します。
 
-詳細は[AirTranslate 1.4.2リリースノート](https://github.com/himomohi/AirTranslate/releases/tag/v1.4.2)をご覧ください。
+詳細は[AirTranslate 1.4.2リリースノート](https://github.com/scor1114/AirTranslate/releases/tag/v1.4.2)をご覧ください。
 
 ## 1.4.1の主な変更点
 
@@ -81,7 +91,7 @@ AirTranslateは、Macで再生されている音声をリアルタイムで文�
 - **正当な繰り返しは維持:** 短いリプレイ防止時間を過ぎた実際の繰り返しフレーズは、同じセッション内でも再度読み上げられます。
 - **集中的な回帰テスト:** 翻訳音声の進行ロジックを専用のAirTranslateCoreテストで検証します。
 
-詳細は[AirTranslate 1.4.1リリースノート](https://github.com/himomohi/AirTranslate/releases/tag/v1.4.1)をご覧ください。
+詳細は[AirTranslate 1.4.1リリースノート](https://github.com/scor1114/AirTranslate/releases/tag/v1.4.1)をご覧ください。
 
 ## 主な機能
 
@@ -158,11 +168,11 @@ macOSのプライバシー権限を変更した後は、アプリを終了して
 
 ## ダウンロード
 
-最新のオープンソースビルドは[GitHub Releases](https://github.com/himomohi/AirTranslate/releases/latest)からダウンロードできます。DMGが最も簡単なインストール方法で、ZIPも軽量な配布形式として引き続き利用できます。
+最新のオープンソースビルドは[GitHub Releases](https://github.com/scor1114/AirTranslate/releases/latest)からダウンロードできます。DMGが最も簡単なインストール方法で、ZIPも軽量な配布形式として引き続き利用できます。
 
-- [AirTranslate.dmgをダウンロード](https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg)
-- [AirTranslate-1.5.1.zipをダウンロード](https://github.com/himomohi/AirTranslate/releases/download/v1.5.1/AirTranslate-1.5.1.zip)
-- [AirTranslate.dmg.sha256をダウンロード](https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg.sha256)
+- [AirTranslate.dmgをダウンロード](https://github.com/scor1114/AirTranslate/releases/latest/download/AirTranslate.dmg)
+- [AirTranslate-1.6.0.zipをダウンロード](https://github.com/scor1114/AirTranslate/releases/download/v1.6.0/AirTranslate-1.6.0.zip)
+- [AirTranslate.dmg.sha256をダウンロード](https://github.com/scor1114/AirTranslate/releases/latest/download/AirTranslate.dmg.sha256)
 - [バージョン履歴を見る](Release/VERSION-HISTORY.md)
 
 リリースDMGとZIPは、オープンソース配布用のad-hoc署名ビルドです。まだApple notarization済みの配布ではないため、初回起動時にmacOSが「開発元を確認できません」という警告を表示する場合があります。

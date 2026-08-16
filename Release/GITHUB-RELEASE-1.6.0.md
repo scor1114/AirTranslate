@@ -1,6 +1,6 @@
 # AirTranslate 1.6.0
 
-AirTranslate 1.6.0 adds optional audio recording alongside live transcription and translation, and reworks the OpenAI Realtime transcription path so that stopping a session finishes cleanly instead of dropping the last utterance.
+AirTranslate 1.6.0 adds optional audio recording alongside live transcription and translation, reworks how the OpenAI Realtime transcription path stops a session, and fixes missing spacing between live translation turns.
 
 AirTranslate is an independent open-source project and is not affiliated with Apple, OpenAI, or Google.
 
@@ -14,19 +14,20 @@ AirTranslate is an independent open-source project and is not affiliated with Ap
 ## Changed
 
 - GPT Live Transcribe now drives turn boundaries from the app instead of server voice-activity detection, committing audio after a silence gap, after a maximum turn length, or after 15 seconds of uncommitted audio. Transcription requests use the higher-accuracy delay setting, and noise reduction is applied to microphone input only.
-- Audio encoding for recordings runs on its own queue instead of the capture callback, so recording no longer competes with live captioning. If the encoder falls behind, the omitted chunk count is reported rather than silently growing memory.
-- Pressing Stop now ends microphone and screen capture immediately, before waiting for the transcription service to finalize, so the macOS recording indicator turns off right away.
+- Audio encoding for recordings runs on its own queue instead of the capture callback, so encoding no longer blocks audio capture. The queue holds at most 32 pending buffers; anything past that is dropped and the omitted chunk count is reported rather than silently growing memory.
+- Pressing Stop now starts microphone and screen capture shutdown before waiting for the transcription service to finalize, instead of leaving capture running for the whole drain.
 - The Realtime translation session no longer sends fields the current translation schema does not accept.
 
 ## Fixed
 
 - A single unreadable audio buffer no longer deletes the entire recording. The file is closed and everything recorded up to that point is kept.
 - The recording currently being written can no longer be deleted from the transcript library, either individually or through Delete All.
-- A quiet speaker whose input never crosses the silence threshold no longer produces zero transcripts in GPT Live Transcribe.
+- GPT Live Transcribe now commits audio after 15 seconds regardless of the measured input level. Previously, with server voice-activity detection turned off, turn commits depended on the level crossing a silence threshold, so quiet input could stay uncommitted.
 - A rejected empty audio commit is now treated as recoverable instead of ending the session with a connection failure.
 - Stopping in GPT transcription mode no longer appears to do nothing for several seconds, and a finalization that times out now warns that the last utterance may be missing.
 - Pausing in GPT transcription mode now accepts only the pending flush rather than transcripts arriving throughout the pause.
 - A recording whose transcript-based name is already taken is kept under its timestamped name and reported, instead of being reported as a failure.
+- Live translation no longer loses the space between provider turns, which previously ran them together as text like `배송되고거기서`. Turns are now joined on segment boundaries with a separator appropriate to the language. This applies to the GPT realtime translation paths.
 - Quitting the app now waits for the recording to be finalized before exiting.
 
 ## Scope
@@ -38,15 +39,26 @@ AirTranslate is an independent open-source project and is not affiliated with Ap
 
 ## Verification
 
-- The release branch is verified with the repository's tests, a release build, packaging permission checks, and an actual app launch.
-- Release artifacts are rebuilt from the tagged source and checked for expected contents, checksum consistency, code-signature integrity, and sensitive files or secret patterns before upload.
+- `swift test`: 220 tests in 24 suites passed.
+- `swift build -c release`: succeeded. The only warning is a pre-existing `String(cString:)` deprecation in `RunningAppVersion.swift`.
+- The packaged app reports version 1.6.0 build 160, `codesign --verify --deep --strict` reports it valid and satisfying its Designated Requirement, and the repository's packaging permission check passed.
+- The release binary was scanned for secret patterns with no matches.
+- The packaged app was launched as the only running instance and quit cleanly.
 - macOS Gatekeeper may still show an unidentified-developer warning because these open-source artifacts are ad-hoc signed and not Apple-notarized.
+
+### Artifact checksums
+
+- `AirTranslate-1.6.0.zip` — SHA-256 `f9188d212de9da67ddf7bba23751d2a0cc016224e188509b50f972920cba4fd6`
+- `AirTranslate-1.6.0.dmg` — SHA-256 `de6af1677f46b0fa4e6ace8a364589dac4bf9df7a291aa8c98e6b7420aa7895e`
 
 ## Download
 
+This is the `scor1114` fork of AirTranslate. Recording defaults differ from upstream; see Added above.
+
 - [Repository](https://github.com/scor1114/AirTranslate)
 - [AirTranslate 1.6.0 release](https://github.com/scor1114/AirTranslate/releases/tag/v1.6.0)
-- [Latest stable DMG download](https://github.com/scor1114/AirTranslate/releases/latest/download/AirTranslate.dmg)
+- [AirTranslate-1.6.0.dmg](https://github.com/scor1114/AirTranslate/releases/download/v1.6.0/AirTranslate-1.6.0.dmg)
+- [AirTranslate-1.6.0.zip](https://github.com/scor1114/AirTranslate/releases/download/v1.6.0/AirTranslate-1.6.0.zip)
 - [Upstream project](https://github.com/himomohi/AirTranslate)
 
 ## Distribution Notes

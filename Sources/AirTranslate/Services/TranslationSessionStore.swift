@@ -777,8 +777,8 @@ final class TranslationSessionStore {
     )
     private var realtimeTranslationSource = RealtimeTranscriptAccumulator()
     private var realtimeTranslationOutput = RealtimeTranscriptAccumulator()
-    private var geminiLiveInputTranscript = RealtimeTranscriptAccumulator()
-    private var geminiLiveOutputTranscript = RealtimeTranscriptAccumulator()
+    private var geminiLiveInputTranscriptText = ""
+    private var geminiLiveOutputTranscriptText = ""
     private var activeAutosaveSourceText = ""
     private var activeAutosaveTranslatedText = ""
     private var activeAutosaveBaseFileName: String?
@@ -2378,8 +2378,8 @@ final class TranslationSessionStore {
         resetTranslationCache()
         realtimeTranslationSource.reset()
         realtimeTranslationOutput.reset()
-        geminiLiveInputTranscript.reset()
-        geminiLiveOutputTranscript.reset()
+        geminiLiveInputTranscriptText = ""
+        geminiLiveOutputTranscriptText = ""
         activeAutosaveSourceText = ""
         activeAutosaveTranslatedText = ""
         activeAutosaveBaseFileName = nil
@@ -4329,24 +4329,43 @@ final class TranslationSessionStore {
     private func updateGeminiLiveInputTranscript(_ text: String) {
         guard isRunning, !isPaused else { return }
         guard text.rangeOfCharacter(from: .whitespacesAndNewlines.inverted) != nil
-            || !geminiLiveInputTranscript.text.isEmpty else { return }
+            || !geminiLiveInputTranscriptText.isEmpty else { return }
 
-        geminiLiveInputTranscript.append(text, languageID: sourceLanguage.id)
+        geminiLiveInputTranscriptText = accumulatedRealtimeText(
+            current: geminiLiveInputTranscriptText,
+            next: text
+        )
         refreshGeminiLiveCaptionLine()
     }
 
     private func updateGeminiLiveOutputTranscript(_ text: String) {
         guard isRunning, !isPaused else { return }
         guard text.rangeOfCharacter(from: .whitespacesAndNewlines.inverted) != nil
-            || !geminiLiveOutputTranscript.text.isEmpty else { return }
+            || !geminiLiveOutputTranscriptText.isEmpty else { return }
 
-        geminiLiveOutputTranscript.append(text, languageID: targetLanguage.id)
+        geminiLiveOutputTranscriptText = accumulatedRealtimeText(
+            current: geminiLiveOutputTranscriptText,
+            next: text
+        )
         refreshGeminiLiveCaptionLine()
     }
 
+    // Gemini Live sends each transcription message independently and does not guarantee
+    // ordering, so the segment-aware accumulator used for the GPT paths does not apply here.
+    // See decisions.md, 2026-08-16.
+    private func accumulatedRealtimeText(current: String, next: String) -> String {
+        if next.hasPrefix(current) {
+            return next
+        }
+        if current.hasSuffix(next) {
+            return current
+        }
+        return current + next
+    }
+
     private func refreshGeminiLiveCaptionLine() {
-        let inputText = geminiLiveInputTranscript.text
-        let outputText = geminiLiveOutputTranscript.text
+        let inputText = geminiLiveInputTranscriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outputText = geminiLiveOutputTranscriptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !inputText.isEmpty || !outputText.isEmpty else { return }
 
         lastRecognizedText = inputText.isEmpty ? outputText : inputText

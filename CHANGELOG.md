@@ -18,8 +18,8 @@ No unreleased changes yet.
 ### Changed
 
 - GPT Live Transcribe now drives turn boundaries from the client instead of server voice-activity detection, committing audio on a silence gap, on a maximum turn length, or after 15 seconds of uncommitted audio. Transcription uses the higher-accuracy delay setting, and noise reduction is applied to microphone input only.
-- Moved recording's AAC encoding off the capture callback onto a dedicated serial queue with a bounded backlog, so recording no longer competes with live captioning; omitted chunks are counted and reported instead of growing memory without limit.
-- Stop now ends microphone and screen capture before waiting for transcription finalization, so the macOS recording indicator clears immediately.
+- Moved recording's AAC encoding off the capture callback and the shared pipeline lock onto a dedicated serial queue, so encoding no longer blocks the capture callback. The queue keeps at most 32 pending buffers; samples past the cap are dropped and reported by chunk and byte count instead of growing memory without limit.
+- Stop now begins microphone and screen capture shutdown before waiting for transcription finalization, instead of deferring it until the drain completes.
 - Removed fields the current Realtime translation schema does not accept from the translation session update.
 - Modeled deferred-stop as store-owned state rather than a comparison against the localized status string.
 
@@ -27,12 +27,13 @@ No unreleased changes yet.
 
 - Kept a recording intact when a single unreadable audio buffer fails mid-session; the file is closed and everything recorded so far is preserved instead of deleted.
 - Prevented deletion of the recording currently being written, from both the per-item and Delete All paths.
-- Fixed GPT Live Transcribe producing no transcripts for a quiet speaker whose input never crossed the silence threshold once server voice-activity detection was disabled.
+- Added a byte-based commit fallback for GPT Live Transcribe. With server voice-activity detection disabled, turn commits were driven only by a reported level crossing -50 dBFS, so audio that never crossed it stayed uncommitted; 15 seconds of uncommitted audio now forces a commit regardless of level.
 - Treated a rejected empty audio commit as recoverable instead of ending the session with a connection failure, and stopped sending commits carrying less than 100 ms of audio.
 - Fixed Stop appearing to do nothing for several seconds in GPT transcription mode, and surfaced a timed-out finalization as a warning that the last utterance may be missing.
 - Bounded paused GPT transcript acceptance to a single flush instead of the entire pause.
 - Reported a recording whose transcript-based name is already taken under its timestamped name instead of reporting a failure.
 - Removed the partially created `.m4a` when opening the recording file fails, and rejected non-16-bit or big-endian PCM input rather than writing corrupted audio.
+- Fixed live translation losing the space between provider turns, which joined them into text such as `배송되고거기서` and `쓰입니다그리고`. Snapshots are now combined on segment boundaries with a language-appropriate separator. This covers the GPT realtime translation paths; the Gemini paths keep their previous joining because Gemini sends each transcription message independently without guaranteed ordering.
 - Finalized the recording before the app exits.
 
 ## 1.5.1 - 2026-08-09

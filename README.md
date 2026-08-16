@@ -5,8 +5,8 @@
 Live system-audio transcription and translation for macOS.
 
 <p align="center">
-  <a href="https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg"><img alt="Download AirTranslate.dmg" src="https://img.shields.io/badge/Download-AirTranslate.dmg-2EA44F?style=for-the-badge&logo=apple&logoColor=white"></a>
-  <a href="https://github.com/himomohi/AirTranslate/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/himomohi/AirTranslate?style=for-the-badge&label=Latest"></a>
+  <a href="https://github.com/scor1114/AirTranslate/releases/latest/download/AirTranslate.dmg"><img alt="Download AirTranslate.dmg" src="https://img.shields.io/badge/Download-AirTranslate.dmg-2EA44F?style=for-the-badge&logo=apple&logoColor=white"></a>
+  <a href="https://github.com/scor1114/AirTranslate/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/scor1114/AirTranslate?style=for-the-badge&label=Latest"></a>
   <a href="https://himomohi.github.io/AirTranslate/"><img alt="Official guide site" src="https://img.shields.io/badge/Guide-Site-0A84FF?style=for-the-badge"></a>
 </p>
 
@@ -47,6 +47,16 @@ The default workflow uses Apple frameworks. GPT Realtime and Gemini Live Transla
 
 > "Turn any Mac audio into live captions and translation, right where you are watching."
 
+## What's New in 1.6.0
+
+- **Optional audio recording, enabled by default:** While capture runs, the microphone or Mac audio is also saved as a compressed `.m4a` beside your transcripts. Turn it off with the **Save audio file** checkbox on the main screen; recordings never leave your Mac.
+- **Recording-aware transcript library:** Recordings without transcript text appear as audio-only rows, deleting a transcript removes its paired recording, and the recording currently being written is protected from deletion.
+- **More reliable GPT Live Transcribe:** Turn boundaries are driven by the app, audio is committed after 15 seconds regardless of input level, and an empty-commit rejection is recoverable instead of fatal.
+- **Better stop behavior:** Stop shows a Stopping state, begins capture shutdown before draining transcription, and a second press ends the session immediately.
+- **Live translation spacing fixed:** Provider turns are joined on segment boundaries, so translated text no longer runs together as `배송되고거기서`.
+
+See the complete [AirTranslate 1.6.0 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.6.0).
+
 ## What's New in 1.5.1
 
 - **Minimal, consistent interface:** The workspace, sidebar, menu bar, floating captions, transcript library, and Settings now share one restrained system for spacing, icons, surfaces, selection, and hover feedback.
@@ -54,7 +64,7 @@ The default workflow uses Apple frameworks. GPT Realtime and Gemini Live Transla
 - **More reliable settings controls:** Voice volume follows the voice-output state, API-key persistence uses one session-store path, startup checks Keychain presence without reading secret data or showing authentication UI, and floating-caption previews follow the selected display mode.
 - **Keyboard and accessibility:** Settings preserve section identity while navigating, provide clearer accessibility labels and values, and respect Reduce Motion.
 
-See the complete [AirTranslate 1.5.1 release notes](https://github.com/himomohi/AirTranslate/releases/tag/v1.5.1).
+See the complete [AirTranslate 1.5.1 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.5.1).
 
 ## What's New in 1.5.0
 
@@ -63,14 +73,14 @@ See the complete [AirTranslate 1.5.1 release notes](https://github.com/himomohi/
 - **No silent speech-input loss:** audio backpressure becomes a visible controlled stop instead of silently dropping input.
 - **Optional GPT Transcription:** choose `gpt-live-transcribe` for source-only captions only when you provide an OpenAI API key; it is separate from GPT live translation.
 
-See the complete [AirTranslate 1.5.0 release notes](https://github.com/himomohi/AirTranslate/releases/tag/v1.5.0).
+See the complete [AirTranslate 1.5.0 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.5.0).
 
 ## What's New in 1.4.2
 
 - **Reliable microphone permission prompt:** signed local and release builds now embed the macOS microphone audio-input entitlement required for permission requests.
 - **Release-signing guard:** packaging checks verify Hardened Runtime, the release/debug entitlement split, and the microphone permission description before distribution.
 
-See the complete [AirTranslate 1.4.2 release notes](https://github.com/himomohi/AirTranslate/releases/tag/v1.4.2).
+See the complete [AirTranslate 1.4.2 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.4.2).
 
 ## What's New in 1.4.1
 
@@ -81,7 +91,7 @@ See the complete [AirTranslate 1.4.2 release notes](https://github.com/himomohi/
 - **Legitimate repeats preserved:** repeated phrases can still be spoken later in a session after the short replay window expires.
 - **Focused regression coverage:** the translated-speech progress logic is covered by dedicated AirTranslateCore tests.
 
-See the complete [AirTranslate 1.4.1 release notes](https://github.com/himomohi/AirTranslate/releases/tag/v1.4.1).
+See the complete [AirTranslate 1.4.1 release notes](https://github.com/scor1114/AirTranslate/releases/tag/v1.4.1).
 
 ## Core Features
 
@@ -158,13 +168,13 @@ After changing macOS privacy permissions, quit and relaunch the app so the signe
 
 ## Download
 
-Download the latest open-source build from [GitHub Releases](https://github.com/himomohi/AirTranslate/releases/latest). The DMG is the easiest install path, and the ZIP remains available as the original lightweight option.
+Download the latest open-source build from [GitHub Releases](https://github.com/scor1114/AirTranslate/releases/latest). The DMG is the easiest install path, and the ZIP remains available as the original lightweight option.
 
 AirTranslate remains fully open-source under the Apache-2.0 License. The DMG is provided only as a convenient macOS installer, while all source code, build scripts, release materials, LICENSE, and NOTICE files remain available in this repository.
 
-- [Download AirTranslate.dmg](https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg)
-- [Download AirTranslate-1.5.1.zip](https://github.com/himomohi/AirTranslate/releases/download/v1.5.1/AirTranslate-1.5.1.zip)
-- [Download AirTranslate.dmg.sha256](https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg.sha256)
+- [Download AirTranslate.dmg](https://github.com/scor1114/AirTranslate/releases/latest/download/AirTranslate.dmg)
+- [Download AirTranslate-1.6.0.zip](https://github.com/scor1114/AirTranslate/releases/download/v1.6.0/AirTranslate-1.6.0.zip)
+- [Download AirTranslate.dmg.sha256](https://github.com/scor1114/AirTranslate/releases/latest/download/AirTranslate.dmg.sha256)
 - [View version history](Release/VERSION-HISTORY.md)
 
 ![AirTranslate install guide](docs/assets/airtranslate-install-guide.svg)
