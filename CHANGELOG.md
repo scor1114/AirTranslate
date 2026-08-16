@@ -6,6 +6,35 @@ All notable changes to AirTranslate are documented in this file.
 
 No unreleased changes yet.
 
+## 1.6.0 - 2026-08-16
+
+### Added
+
+- Added optional audio recording alongside transcription and translation. Captured microphone or Mac audio is written as a compressed `.m4a` beside the transcript files. The setting is **enabled by default**, persists across launches, is locked during an active session, and omits audio while paused; turn it off with the `녹음 파일 저장 / Save audio file` checkbox on the main screen.
+- Added audio-only rows to the transcript library so a recording made without any saved transcript text is still visible and manageable.
+- Added recording-aware deletion: removing a saved transcript also removes its paired recording, and Delete All removes `.m4a` files as well as `.txt` files. Both confirmation dialogs state this.
+- Added a Stopping state for GPT transcription shutdown, including a hint that pressing Stop again ends the session immediately.
+
+### Changed
+
+- GPT Live Transcribe now drives turn boundaries from the client instead of server voice-activity detection, committing audio on a silence gap, on a maximum turn length, or after 15 seconds of uncommitted audio. Transcription uses the higher-accuracy delay setting, and noise reduction is applied to microphone input only.
+- Moved recording's AAC encoding off the capture callback onto a dedicated serial queue with a bounded backlog, so recording no longer competes with live captioning; omitted chunks are counted and reported instead of growing memory without limit.
+- Stop now ends microphone and screen capture before waiting for transcription finalization, so the macOS recording indicator clears immediately.
+- Removed fields the current Realtime translation schema does not accept from the translation session update.
+- Modeled deferred-stop as store-owned state rather than a comparison against the localized status string.
+
+### Fixed
+
+- Kept a recording intact when a single unreadable audio buffer fails mid-session; the file is closed and everything recorded so far is preserved instead of deleted.
+- Prevented deletion of the recording currently being written, from both the per-item and Delete All paths.
+- Fixed GPT Live Transcribe producing no transcripts for a quiet speaker whose input never crossed the silence threshold once server voice-activity detection was disabled.
+- Treated a rejected empty audio commit as recoverable instead of ending the session with a connection failure, and stopped sending commits carrying less than 100 ms of audio.
+- Fixed Stop appearing to do nothing for several seconds in GPT transcription mode, and surfaced a timed-out finalization as a warning that the last utterance may be missing.
+- Bounded paused GPT transcript acceptance to a single flush instead of the entire pause.
+- Reported a recording whose transcript-based name is already taken under its timestamped name instead of reporting a failure.
+- Removed the partially created `.m4a` when opening the recording file fails, and rejected non-16-bit or big-endian PCM input rather than writing corrupted audio.
+- Finalized the recording before the app exits.
+
 ## 1.5.1 - 2026-08-09
 
 ### Added
