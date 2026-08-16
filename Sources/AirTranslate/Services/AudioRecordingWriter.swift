@@ -9,6 +9,8 @@ final class AudioRecordingWriter: @unchecked Sendable {
     private var audioFile: ExtAudioFileRef?
     private(set) var fileURL: URL?
     private var didFail = false
+    private var hasWrittenAudio = false
+    var didOpenFile: (@Sendable (URL) -> Void)?
     var isPaused = false
 
     init(directoryURL: URL, inputSource: AudioInputSource, startedAt: Date = Date()) {
@@ -29,7 +31,7 @@ final class AudioRecordingWriter: @unchecked Sendable {
             try appendPCM16(audio.data, sampleRate: audio.sampleRate)
             return nil
         } catch {
-            failAndRemoveIncompleteFile()
+            stopAfterFailure()
             return error
         }
     }
@@ -54,6 +56,7 @@ final class AudioRecordingWriter: @unchecked Sendable {
             return ExtAudioFileWrite(audioFile, UInt32(data.count / MemoryLayout<Int16>.size), &bufferList)
         }
         try Self.check(status)
+        hasWrittenAudio = true
     }
 
     @discardableResult
@@ -121,6 +124,7 @@ final class AudioRecordingWriter: @unchecked Sendable {
 
         audioFile = file
         self.fileURL = fileURL
+        didOpenFile?(fileURL)
     }
 
     private func uniqueRecordingURL() -> URL {
@@ -139,12 +143,11 @@ final class AudioRecordingWriter: @unchecked Sendable {
         return candidate
     }
 
-    private func failAndRemoveIncompleteFile() {
+    private func stopAfterFailure() {
         didFail = true
-        let incompleteURL = finish()
-        if let incompleteURL {
-            try? FileManager.default.removeItem(at: incompleteURL)
-        }
+        let failedURL = finish()
+        guard !hasWrittenAudio else { return }
+        if let failedURL { try? FileManager.default.removeItem(at: failedURL) }
         fileURL = nil
     }
 

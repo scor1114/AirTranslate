@@ -254,7 +254,7 @@ private final class SendableAudioSampleBuffer: @unchecked Sendable {
     }
 }
 
-private final class AudioSamplePipelineRegistry: @unchecked Sendable {
+final class AudioSamplePipelineRegistry: @unchecked Sendable {
     private struct Pipeline {
         let generation: UInt64
         let transcriber: LiveSpeechTranscriber
@@ -268,6 +268,7 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
 
     private let lock = NSLock()
     private var pipeline: Pipeline?
+    private var activeRecordingFileURL: URL?
 
     func publish(
         generation: UInt64,
@@ -278,6 +279,10 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         recordingFailure: @escaping @Sendable (Error) -> Void
     ) {
         lock.lock()
+        recordingWriter?.didOpenFile = { [weak self] fileURL in
+            self?.recordingDidOpen(fileURL, generation: generation)
+        }
+        activeRecordingFileURL = recordingWriter?.fileURL
         pipeline = Pipeline(
             generation: generation,
             transcriber: transcriber,
@@ -298,6 +303,7 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         lock.lock()
         let retiredPipeline = pipeline
         self.pipeline = nil
+        activeRecordingFileURL = nil
         lock.unlock()
         guard let retiredPipeline else { return nil }
 
@@ -308,6 +314,19 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         return recordingQueue.sync {
             recordingWriter.finish()
         }
+    }
+
+    func currentRecordingFileURL() -> URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeRecordingFileURL
+    }
+
+    private func recordingDidOpen(_ fileURL: URL, generation: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard pipeline?.generation == generation else { return }
+        activeRecordingFileURL = fileURL
     }
 
     func setRecordingPaused(_ isPaused: Bool) {
@@ -600,7 +619,7 @@ final class TranslationSessionStore {
     @ObservationIgnored private var transcriber = LiveSpeechTranscriber()
     @ObservationIgnored private var openAITranscriber = OpenAIRealtimeTranscriber()
     @ObservationIgnored private var geminiLiveTranslator = GeminiLiveTranslationService()
-    @ObservationIgnored nonisolated private let audioSamplePipelineRegistry = AudioSamplePipelineRegistry()
+    @ObservationIgnored nonisolated private let audioSamplePipelineRegistry: AudioSamplePipelineRegistry
     @ObservationIgnored nonisolated private let openAITerminalTranscriptMailbox =
         OpenAITerminalTranscriptMailbox()
     private let translator = AppleTranslationService()
@@ -752,13 +771,15 @@ final class TranslationSessionStore {
             @Sendable (LanguageOption, LanguageOption, IntelligenceModel) async throws -> Void
         )? = nil,
         transcriptsDirectoryURL: URL? = nil,
-        transcriptCheckpointInterval: TimeInterval = TranslationSessionStore.defaultTranscriptCheckpointInterval
+        transcriptCheckpointInterval: TimeInterval = TranslationSessionStore.defaultTranscriptCheckpointInterval,
+        audioSamplePipelineRegistry: AudioSamplePipelineRegistry = AudioSamplePipelineRegistry()
     ) {
         self.modelAvailabilityProvider = modelAvailabilityProvider
         self.modelAssetDownloader = modelAssetDownloader
         self.translationSessionPreparer = translationSessionPreparer
         self.transcriptsDirectoryOverride = transcriptsDirectoryURL
         self.transcriptCheckpointInterval = transcriptCheckpointInterval
+        self.audioSamplePipelineRegistry = audioSamplePipelineRegistry
         restoreSelectedSettings()
         applyTranslatedVoiceVolume()
         syncLiveOutputModeWithLanguagePair()
@@ -1859,6 +1880,12 @@ final class TranslationSessionStore {
     func deleteSelectedTranscript() {
         guard let selectedTranscript = selectedSavedTranscript else { return }
 
+        if let recordingURL = associatedRecordingURL(for: selectedTranscript),
+           isActiveRecordingFile(recordingURL) {
+            loadSavedTranscripts()
+            return
+        }
+
         savedTranscripts.removeAll { $0.id == selectedTranscript.id }
         if let sourceFileName = selectedTranscript.sourceFileName {
             try? FileManager.default.removeItem(at: transcriptURL(fileName: sourceFileName))
@@ -1885,7 +1912,9 @@ final class TranslationSessionStore {
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             )
-            for fileURL in fileURLs where ["txt", "m4a"].contains(fileURL.pathExtension.lowercased()) {
+            for fileURL in fileURLs
+            where ["txt", "m4a"].contains(fileURL.pathExtension.lowercased())
+                && !isActiveRecordingFile(fileURL) {
                 try FileManager.default.removeItem(at: fileURL)
             }
             savedTranscripts.removeAll()
@@ -2438,7 +2467,10 @@ final class TranslationSessionStore {
                     )
                 }
             let recordingFiles = fileURLs
-                .filter { $0.pathExtension.lowercased() == "m4a" }
+                .filter {
+                    $0.pathExtension.lowercased() == "m4a"
+                        && !isActiveRecordingFile($0)
+                }
                 .map { fileURL -> SavedTranscriptFile in
                     let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey])
                     return SavedTranscriptFile(
@@ -2724,6 +2756,11 @@ final class TranslationSessionStore {
         guard let sourceFileName = transcript.sourceFileName else { return nil }
         let baseFileName = transcriptVariantInfo(sourceFileName)?.baseFileName ?? sourceFileName
         return transcriptURL(fileName: recordingFileName(forTranscriptBaseFileName: baseFileName))
+    }
+
+    private func isActiveRecordingFile(_ fileURL: URL) -> Bool {
+        guard let activeURL = audioSamplePipelineRegistry.currentRecordingFileURL() else { return false }
+        return fileURL.standardizedFileURL == activeURL.standardizedFileURL
     }
 
     private func recordingFileName(forTranscriptBaseFileName fileName: String) -> String {
