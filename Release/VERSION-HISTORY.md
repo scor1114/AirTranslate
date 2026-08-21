@@ -1,5 +1,25 @@
 # AirTranslate Version History
 
+## 1.6.1 - 2026-08-22
+
+### Added
+
+- A default-off, session-only Interpreter / mixed input option for GPT Realtime that uses the
+  selected source/target pair and Apple Translation without pair-specific meeting modes.
+
+### Changed
+
+- Mixed input routes completed GPT transcription turns by sentence and script evidence, retaining
+  ambiguous input and short shared-script speech to avoid silent source loss.
+- The main-screen help states that captions can be delayed until a continuous utterance is finalized.
+
+### Fixed
+
+- Target-language interpreter repeats can be omitted without leaving an earlier partial caption.
+- Unpunctuated Korean/English mixed turns are retained instead of being discarded as target-only.
+- Mixed input checks Apple Translation assets only and preserves the selected target when language
+  selections would otherwise become identical.
+
 ## 1.6.0 - 2026-08-16
 
 ### Added

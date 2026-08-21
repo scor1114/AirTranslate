@@ -6,6 +6,30 @@ All notable changes to AirTranslate are documented in this file.
 
 No unreleased changes yet.
 
+## 1.6.1 - 2026-08-22
+
+### Added
+
+- Added a default-off, session-only **Interpreter / mixed input** option for GPT Realtime. It sends
+  the selected source and target languages to GPT Live Transcribe, then translates accepted source
+  speech with Apple Translation without adding pair-specific meeting modes.
+
+### Changed
+
+- Mixed input waits for completed GPT transcription turns before routing them. The main-screen help
+  explains that continuous speech can delay caption updates until the utterance is finalized.
+- Mixed-language routing uses sentence boundaries, distinct writing-system evidence, and conservative
+  handling of short shared-script speech. Ambiguous input is retained rather than silently deleted.
+
+### Fixed
+
+- Prevented an early ambiguous partial caption from surviving after the completed target-language
+  utterance is filtered.
+- Preserved unpunctuated Korean/English mixed turns that Natural Language classification previously
+  treated as entirely target-language speech.
+- Required only Apple Translation assets for mixed input and kept the selected target language stable
+  when source and target selections would otherwise match.
+
 ## 1.6.0 - 2026-08-16
 
 ### Added
