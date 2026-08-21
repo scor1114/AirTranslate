@@ -80,6 +80,7 @@ struct StartConfiguration: Equatable {
     let openAITranslationModel: OpenAIRealtimeTranslationModel
     let geminiTranslationModel: GeminiTranslationModel
     let usesAppleSourceAutoDetection: Bool
+    let usesMixedLanguageInterpreterInput: Bool
 
     var isUsingGPTTranscriptionMode: Bool {
         openAITranscriptionModel == .gptLiveTranscribe
@@ -87,6 +88,10 @@ struct StartConfiguration: Equatable {
 
     var isTranscribeOnlyMode: Bool {
         selectedModel == .appleSpeechOnly || isUsingGPTTranscriptionMode
+    }
+
+    var usesGPTTranscriptionPipeline: Bool {
+        isUsingGPTTranscriptionMode || usesMixedLanguageInterpreterInput
     }
 
     var sampleRate: Int {
@@ -684,6 +689,14 @@ final class TranslationSessionStore {
             refreshModelAvailability()
         }
     }
+    var isMixedLanguageInterpreterInputEnabled = false {
+        didSet {
+            normalizeMixedLanguagePairIfNeeded()
+            resetTranslationCache()
+            resetDubbingProgress()
+            refreshModelAvailability()
+        }
+    }
     var audioInputSource = AudioInputSource.systemAudio {
         didSet { persistSelectedSettings() }
     }
@@ -833,8 +846,18 @@ final class TranslationSessionStore {
         openAITranscriptionModel == .gptLiveTranscribe
     }
 
+    var isUsingMixedLanguageInterpreterInput: Bool {
+        isMixedLanguageInterpreterInputEnabled
+            && openAITranslationModel.usesRealtimeAudioTranslation
+    }
+
+    private var usesGPTTranscriptionPipeline: Bool {
+        isUsingGPTTranscriptionMode || isUsingMixedLanguageInterpreterInput
+    }
+
     var isUsingOpenAIRealtimeTranslation: Bool {
         openAITranslationModel.usesRealtimeAudioTranslation
+            && !isUsingMixedLanguageInterpreterInput
     }
 
     var isUsingGeminiTranslation: Bool {
@@ -980,7 +1003,7 @@ final class TranslationSessionStore {
                     try systemAudioCapture.requestScreenRecordingAccess()
                 }
                 try validatePipelineStart(generation: generation, configuration: configuration)
-                if configuration.isUsingGPTTranscriptionMode {
+                if configuration.usesGPTTranscriptionPipeline {
                     statusMessage = AppText.connectingGPTTranscription
                 } else if configuration.geminiTranslationModel.isEnabled {
                     statusMessage = AppText.connectingGeminiLiveTranslation
@@ -1074,7 +1097,7 @@ final class TranslationSessionStore {
         isStopping = true
         cancelGPTTranscriptionPauseFlush()
         pipelineLifecycle.stop()
-        if isRunning, isUsingGPTTranscriptionMode {
+        if isRunning, usesGPTTranscriptionPipeline {
             statusMessage = AppText.stopping
             audioSamplePipelineRegistry.setRecordingPaused(true)
             let captureStopTask = beginCaptureStop()
@@ -1224,7 +1247,8 @@ final class TranslationSessionStore {
             openAITranscriptionModel: openAITranscriptionModel,
             openAITranslationModel: openAITranslationModel,
             geminiTranslationModel: geminiTranslationModel,
-            usesAppleSourceAutoDetection: isUsingAppleSourceAutoDetection
+            usesAppleSourceAutoDetection: isUsingAppleSourceAutoDetection,
+            usesMixedLanguageInterpreterInput: isUsingMixedLanguageInterpreterInput
         )
     }
 
@@ -1309,7 +1333,10 @@ final class TranslationSessionStore {
     }
 
     private var requiredLocalModelForStart: IntelligenceModel? {
-        if openAITranslationModel.usesRealtimeAudioTranslation {
+        if isUsingMixedLanguageInterpreterInput {
+            return .appleOnDevice
+        }
+        if isUsingOpenAIRealtimeTranslation {
             return nil
         }
         if openAITranscriptionModel.isEnabled {
@@ -1341,7 +1368,7 @@ final class TranslationSessionStore {
     func pause() {
         guard isRunning, !isPaused, gptTranscriptionStopTask == nil else { return }
 
-        if isUsingGPTTranscriptionMode {
+        if usesGPTTranscriptionPipeline {
             realtimeTranscriptionTurnBoundary.reset()
         }
         flushPendingRecognizedCaption()
@@ -1355,7 +1382,7 @@ final class TranslationSessionStore {
         stopSpeaking()
         isPaused = true
         statusMessage = AppText.paused
-        if isUsingGPTTranscriptionMode {
+        if usesGPTTranscriptionPipeline {
             beginGPTTranscriptionPauseFlush()
         }
     }
@@ -1542,6 +1569,10 @@ final class TranslationSessionStore {
             sourceLanguage = language
             return
         }
+        guard !isUsingMixedLanguageInterpreterInput || language != targetLanguage else {
+            showToast(AppText.sameLanguageTranslationUnavailable)
+            return
+        }
 
         let previousSourceLanguage = sourceLanguage
         let nextTargetLanguage = language == targetLanguage
@@ -1600,6 +1631,7 @@ final class TranslationSessionStore {
         applyProviderVoiceOutputDefault()
         restoreFloatingCaptionDisplayModeAfterTranscribeOnly()
         usePreferredLanguageForOpenAIOutput()
+        normalizeMixedLanguagePairIfNeeded()
     }
 
     func useGPTTranscriptionMode() {
@@ -1689,6 +1721,20 @@ final class TranslationSessionStore {
             useTranscribeOnlyMode()
             return
         }
+    }
+
+    private func normalizeMixedLanguagePairIfNeeded() {
+        guard isUsingMixedLanguageInterpreterInput,
+              sourceLanguage == targetLanguage
+        else { return }
+
+        updateLanguagePair(
+            source: fallbackTargetLanguage(
+                excluding: targetLanguage,
+                preferred: sourceLanguage
+            ),
+            target: targetLanguage
+        )
     }
 
     private func updateLanguagePair(source: LanguageOption, target: LanguageOption) {
@@ -2126,7 +2172,13 @@ final class TranslationSessionStore {
         }
         activeCaptionerGeneration = generation
 
-        if configuration.isTranscribeOnlyMode, configuration.openAITranscriptionModel.isEnabled {
+        if configuration.usesMixedLanguageInterpreterInput {
+            try await openAITranscriber.start(
+                languages: [configuration.sourceLanguage, configuration.targetLanguage],
+                model: .gptLiveTranscribe,
+                audioInputSource: configuration.audioInputSource
+            )
+        } else if configuration.isTranscribeOnlyMode, configuration.openAITranscriptionModel.isEnabled {
             try await openAITranscriber.start(
                 language: configuration.sourceLanguage,
                 model: configuration.openAITranscriptionModel,
@@ -2423,7 +2475,7 @@ final class TranslationSessionStore {
 
     private func warmTranslationSession() {
         cancelTranslationSessionWarmup()
-        guard !openAITranslationModel.isEnabled, !geminiTranslationModel.isEnabled else { return }
+        guard !isUsingOpenAIRealtimeTranslation, !geminiTranslationModel.isEnabled else { return }
 
         let warmSourceLanguage = sourceLanguage
         let warmTargetLanguage = targetLanguage
@@ -3180,18 +3232,33 @@ final class TranslationSessionStore {
         recognizedLanguage: LanguageOption,
         confidence: Double
     ) {
+        let routedSourceText: String
+        if isUsingMixedLanguageInterpreterInput {
+            guard let sourceText = MixedLanguageUtteranceRouter.sourceText(
+                from: sourceText,
+                sourceLanguageID: sourceLanguage.id,
+                targetLanguageID: targetLanguage.id
+            ) else { return }
+            routedSourceText = sourceText
+        } else {
+            routedSourceText = sourceText
+        }
+        let effectiveLanguage = isUsingMixedLanguageInterpreterInput
+            ? sourceLanguage
+            : recognizedLanguage
+
         if !isLargeTranscriptRecognitionCoalescingActive {
             let currentSourceLength = lines.last?.sourceText.utf16.count ?? 0
             isLargeTranscriptRecognitionCoalescingActive = usesLongSessionMode
                 || currentSourceLength >= Self.largeTranscriptPresentationCharacterLimit
-                || sourceText.utf16.count >= Self.largeTranscriptPresentationCharacterLimit
+                || routedSourceText.utf16.count >= Self.largeTranscriptPresentationCharacterLimit
         }
 
         guard isLargeTranscriptRecognitionCoalescingActive else {
             lastRecognizedCaptionDeliveryAt = Date()
             appendCaption(
-                sourceText: sourceText,
-                recognizedLanguage: recognizedLanguage,
+                sourceText: routedSourceText,
+                recognizedLanguage: effectiveLanguage,
                 confidence: confidence,
                 isFinal: false
             )
@@ -3199,8 +3266,8 @@ final class TranslationSessionStore {
         }
 
         pendingRecognizedCaption = PendingRecognizedCaption(
-            sourceText: sourceText,
-            recognizedLanguage: recognizedLanguage,
+            sourceText: routedSourceText,
+            recognizedLanguage: effectiveLanguage,
             confidence: confidence
         )
         guard recognizedCaptionDeliveryTask == nil else { return }
@@ -4241,7 +4308,7 @@ final class TranslationSessionStore {
     }
 
     private var translationEngineCacheID: String {
-        if openAITranslationModel.isEnabled {
+        if openAITranslationModel.isEnabled, !isUsingMixedLanguageInterpreterInput {
             return "openai:\(openAITranslationModel.id)"
         }
         return "apple:\(selectedModel.id)"
@@ -4415,7 +4482,7 @@ final class TranslationSessionStore {
     }
 
     private func requestTranslation(for line: CaptionLine, source: LanguageOption, target: LanguageOption) {
-        guard !openAITranslationModel.usesRealtimeAudioTranslation else { return }
+        guard !isUsingOpenAIRealtimeTranslation else { return }
         guard !isUsingGeminiTranslation else { return }
 
         guard !isTranscribeOnlyMode else {
@@ -5069,7 +5136,7 @@ extension TranslationSessionStore: SystemAudioCaptureDelegate {
 
     private func commitRealtimeTranscriptionAtTurnBoundary(level: Float?) {
         guard isRunning,
-              isUsingGPTTranscriptionMode,
+              usesGPTTranscriptionPipeline,
               realtimeTranscriptionTurnBoundary.observe(level: level)
         else { return }
         openAITranscriber.commitTranscriptionAudio()
@@ -5136,6 +5203,9 @@ extension TranslationSessionStore: LiveSpeechTranscriberDelegate {
             guard activeGeneration(for: transcriber, requiresRunning: true) != nil else {
                 return
             }
+            // Mixed-language routing needs the completed utterance. Its terminal
+            // transcript arrives through openAITerminalTranscriptMailbox.
+            guard !isUsingMixedLanguageInterpreterInput else { return }
             enqueueRecognizedCaption(
                 sourceText: text,
                 recognizedLanguage: language,
@@ -5181,7 +5251,7 @@ extension TranslationSessionStore: LiveSpeechTranscriberDelegate {
                   isRunning,
                   !isPaused,
                   isDubbingEnabled,
-                  openAITranslationModel.usesRealtimeAudioTranslation
+                  isUsingOpenAIRealtimeTranslation
             else {
                 return
             }

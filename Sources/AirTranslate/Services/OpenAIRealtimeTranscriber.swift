@@ -196,7 +196,19 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         audioInputSource: AudioInputSource
     ) async throws {
         try await start(
-            language: language,
+            languages: [language],
+            model: model,
+            audioInputSource: audioInputSource
+        )
+    }
+
+    func start(
+        languages: [LanguageOption],
+        model: OpenAIRealtimeTranscriptionModel,
+        audioInputSource: AudioInputSource
+    ) async throws {
+        try await start(
+            languages: languages,
             modelID: model.rawValue,
             outputMode: .transcription,
             isEnabled: model.isEnabled,
@@ -206,7 +218,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
 
     func startRealtimeTranslationOnly(language: LanguageOption, model: OpenAIRealtimeTranslationModel) async throws {
         try await start(
-            language: language,
+            languages: [language],
             modelID: model.apiModelID,
             outputMode: .translationOnly,
             isEnabled: model.usesRealtimeAudioTranslation,
@@ -215,7 +227,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     }
 
     private func start(
-        language: LanguageOption,
+        languages: [LanguageOption],
         modelID: String,
         outputMode: OutputMode,
         isEnabled: Bool,
@@ -226,6 +238,9 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         guard isEnabled else { return }
         guard let apiKey = try OpenAIAPIKeyStore.readAPIKey(), !apiKey.isEmpty else {
             throw OpenAITranslationError.missingAPIKey
+        }
+        guard let callbackLanguage = languages.first else {
+            throw OpenAIRealtimeTranscriberError.connectionFailed
         }
 
         let url: URL
@@ -243,7 +258,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         let generation = stateLock.withLock { () -> UInt64? in
             guard connectionGeneration == startIntentGeneration else { return nil }
             connectionGeneration &+= 1
-            self.language = language
+            self.language = callbackLanguage
             self.outputMode = outputMode
             self.webSocketTask = webSocketTask
             isPaused = false
@@ -257,7 +272,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
 
         do {
             try await sendSessionUpdate(
-                language: language,
+                languages: languages,
                 modelID: modelID,
                 outputMode: outputMode,
                 audioInputSource: audioInputSource,
@@ -667,7 +682,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     }
 
     private func sendSessionUpdate(
-        language: LanguageOption,
+        languages: [LanguageOption],
         modelID: String,
         outputMode: OutputMode,
         audioInputSource: AudioInputSource,
@@ -678,11 +693,14 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         switch outputMode {
         case .transcription:
             data = try Self.transcriptionSessionUpdateData(
-                language: language,
+                languages: languages,
                 modelID: modelID,
                 audioInputSource: audioInputSource
             )
         case .translationOnly:
+            guard let language = languages.first else {
+                throw OpenAIRealtimeTranscriberError.connectionFailed
+            }
             data = try Self.translationSessionUpdateData(language: language)
         }
         guard let text = String(data: data, encoding: .utf8) else { return }
@@ -698,6 +716,24 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         modelID: String,
         audioInputSource: AudioInputSource
     ) throws -> Data {
+        try transcriptionSessionUpdateData(
+            languages: [language],
+            modelID: modelID,
+            audioInputSource: audioInputSource
+        )
+    }
+
+    static func transcriptionSessionUpdateData(
+        languages: [LanguageOption],
+        modelID: String,
+        audioInputSource: AudioInputSource
+    ) throws -> Data {
+        let languageCodes = languages.reduce(into: [String]()) { codes, language in
+            let code = language.openAILanguageCode
+            if !codes.contains(code) {
+                codes.append(code)
+            }
+        }
         let event = OpenAIRealtimeTranscriptionSessionUpdateEvent(
             session: OpenAIRealtimeTranscriptionSession(
                 type: "transcription",
@@ -706,7 +742,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                         format: OpenAIRealtimeAudioFormat(type: "audio/pcm", rate: Self.realtimeAudioSampleRate),
                         transcription: OpenAIRealtimeTranscriptionConfig(
                             model: modelID,
-                            languages: [language.openAILanguageCode],
+                            languages: languageCodes,
                             delay: "high"
                         ),
                         noiseReduction: audioInputSource == .systemAudio

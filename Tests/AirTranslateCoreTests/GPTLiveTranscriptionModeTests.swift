@@ -166,6 +166,22 @@ struct GPTLiveTranscriptionModeTests {
     }
 
     @Test
+    func mixedLanguageTranscriptionSendsBothLanguageHints() throws {
+        let data = try OpenAIRealtimeTranscriber.transcriptionSessionUpdateData(
+            languages: [LanguageOption.supported[2], .korean],
+            modelID: OpenAIRealtimeTranscriptionModel.gptLiveTranscribe.rawValue,
+            audioInputSource: .systemAudio
+        )
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let session = try #require(object["session"] as? [String: Any])
+        let audio = try #require(session["audio"] as? [String: Any])
+        let input = try #require(audio["input"] as? [String: Any])
+        let transcription = try #require(input["transcription"] as? [String: Any])
+
+        #expect(transcription["languages"] as? [String] == ["ja", "ko"])
+    }
+
+    @Test
     func realtimeTranscriptionCommitsAfterSilenceOrMaximumTurnDuration() {
         let startedAt = Date(timeIntervalSince1970: 1_000)
         var boundary = RealtimeTranscriptionTurnBoundary()
@@ -1049,6 +1065,93 @@ struct GPTLiveTranscriptionModeTests {
         #expect(session.floatingCaptionDisplayMode == .original)
         #expect(!session.isDubbingEnabled)
         #expect(session.startReadinessAssessment().issue == .openAIAPIKeyMissing)
+    }
+
+    @Test
+    @MainActor
+    func mixedLanguageInterpreterInputWaitsForTerminalAndFiltersTargetSentences() async {
+        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+        session.sourceLanguage = LanguageOption.supported[2]
+        session.targetLanguage = .korean
+        session.useGPTRealtimeMode()
+        session.isMixedLanguageInterpreterInputEnabled = true
+        let pipeline = session.activateLiveCallbackPipelineForTesting()
+
+        #expect(session.isUsingOpenAIRealtime)
+        #expect(!session.isUsingOpenAIRealtimeTranslation)
+        #expect(!session.isUsingProviderRealtimeTranslation)
+        #expect(!session.isTranscribeOnlyMode)
+
+        session.liveSpeechTranscriber(
+            pipeline.transcriber,
+            didRecognize: "FDA",
+            language: .korean,
+            confidence: 0.9
+        )
+        await Task.yield()
+        #expect(session.lines.isEmpty)
+
+        pipeline.openAITranscriber.onTerminalTranscriptReady?(
+            "FDA 승인을 검토합니다.",
+            .korean,
+            0.9
+        )
+        await Task.yield()
+        #expect(session.lines.isEmpty)
+
+        pipeline.openAITranscriber.onTerminalTranscriptReady?(
+            "本日の会議を始めます。 오늘 회의를 시작하겠습니다.",
+            LanguageOption.supported[2],
+            0.9
+        )
+        await Task.yield()
+        #expect(session.lines.first?.sourceText == "本日の会議を始めます。")
+    }
+
+    @Test
+    @MainActor
+    func mixedLanguageInterpreterInputRequiresOnlyAppleTranslationAssets() {
+        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+        session.useGPTRealtimeMode()
+        session.isMixedLanguageInterpreterInputEnabled = true
+        session.hasOpenAIAPIKey = true
+        session.modelAvailabilityByModelID[IntelligenceModel.appleSystem.id] = ModelAvailability(
+            state: .unavailable,
+            detail: "Speech unavailable"
+        )
+        session.modelAvailabilityByModelID[IntelligenceModel.appleOnDevice.id] = ModelAvailability(
+            state: .installed,
+            detail: "Translation installed"
+        )
+
+        #expect(session.startReadinessAssessment().canStart)
+
+        session.modelAvailabilityByModelID[IntelligenceModel.appleOnDevice.id] = ModelAvailability(
+            state: .downloadRequired,
+            detail: "Translation download needed"
+        )
+        #expect(session.startReadinessAssessment().issue == .localAssetsDownloadRequired)
+    }
+
+    @Test
+    @MainActor
+    func mixedLanguageInterpreterInputRepairsMatchingPairAndPreservesTarget() {
+        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+        session.useGPTRealtimeMode()
+        session.sourceLanguage = .korean
+        session.targetLanguage = .korean
+
+        session.isMixedLanguageInterpreterInputEnabled = true
+
+        #expect(session.targetLanguage == .korean)
+        #expect(session.sourceLanguage != session.targetLanguage)
+        #expect(!session.isTranscribeOnlyMode)
+
+        let repairedSourceLanguage = session.sourceLanguage
+        session.useQuickSourceLanguage(.korean)
+
+        #expect(session.sourceLanguage == repairedSourceLanguage)
+        #expect(session.targetLanguage == .korean)
     }
 
     @Test

@@ -289,7 +289,8 @@ struct AppleLifecycleP2Tests {
             openAITranscriptionModel: .off,
             openAITranslationModel: .off,
             geminiTranslationModel: .off,
-            usesAppleSourceAutoDetection: false
+            usesAppleSourceAutoDetection: false,
+            usesMixedLanguageInterpreterInput: false
         )
     }
 

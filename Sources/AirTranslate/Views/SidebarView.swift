@@ -76,6 +76,26 @@ struct SidebarView: View {
                 )
                 }
 
+                if showsMixedLanguageInterpreterInput {
+                    SidebarDivider()
+
+                    QuickSettingRow(
+                        title: mixedLanguageInterpreterInputTitle,
+                        systemImage: "person.2.wave.2"
+                    ) {
+                        Toggle(
+                            mixedLanguageInterpreterInputTitle,
+                            isOn: mixedLanguageInterpreterInputBinding
+                        )
+                        .labelsHidden()
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .disabled(isSessionConfigurationLocked)
+                        .help(mixedLanguageInterpreterInputHelp)
+                        .accessibilityLabel(mixedLanguageInterpreterInputTitle)
+                    }
+                }
+
                 SidebarDivider()
 
                 QuickSettingRow(
@@ -261,6 +281,10 @@ struct SidebarView: View {
         lockedSessionConfigurationBinding($session.isAudioRecordingEnabled)
     }
 
+    private var mixedLanguageInterpreterInputBinding: Binding<Bool> {
+        lockedSessionConfigurationBinding($session.isMixedLanguageInterpreterInputEnabled)
+    }
+
     private var dubbingEnabledBinding: Binding<Bool> {
         lockedSessionConfigurationBinding($session.isDubbingEnabled)
     }
@@ -309,6 +333,29 @@ struct SidebarView: View {
 
     private var usesOpenAIAutoLanguageFlow: Bool {
         ProcessingEngine.current(for: session) == .gpt && session.isUsingOpenAIRealtimeTranslation
+    }
+
+    private var showsMixedLanguageInterpreterInput: Bool {
+        ProcessingEngine.current(for: session) == .gpt
+            && session.openAITranslationModel.usesRealtimeAudioTranslation
+    }
+
+    private var mixedLanguageInterpreterInputTitle: String {
+        AppText.localized(
+            english: "Interpreter / mixed input",
+            korean: "통역 포함 혼합 입력",
+            japanese: "通訳を含む混合入力",
+            chineseSimplified: "含口译的混合输入"
+        )
+    }
+
+    private var mixedLanguageInterpreterInputHelp: String {
+        AppText.localized(
+            english: "GPT transcribes both selected languages. Apple translates source-language speech; confidently detected target-only sentences are omitted. Captions appear after each utterance is finalized, so continuous speech may delay updates.",
+            korean: "GPT가 선택한 두 언어를 전사하고 Apple이 원문 언어 발화를 번역합니다. 대상 언어만으로 된 것으로 명확히 판별된 문장은 제외합니다. 발화 구간이 확정된 뒤 표시되므로 쉬지 않고 말하면 자막이 늦어질 수 있습니다.",
+            japanese: "GPTが選択した2言語を文字起こしし、Appleが原文言語の発話を翻訳します。対象言語だけと明確に判定された文は除外します。発話区間の確定後に表示されるため、連続した発話では字幕が遅れることがあります。",
+            chineseSimplified: "GPT 会转写所选的两种语言，Apple 会翻译源语言发言，并省略被明确识别为仅含目标语言的句子。字幕会在每段发言确定后显示，因此连续讲话时可能会延迟更新。"
+        )
     }
 
     private var usesAPIModeOutputControl: Bool {
