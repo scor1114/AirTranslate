@@ -6,6 +6,22 @@ All notable changes to AirTranslate are documented in this file.
 
 No unreleased changes yet.
 
+## 1.6.2 - 2026-09-08
+
+### Changed
+
+- Direct GPT Realtime translation explicitly disables input noise reduction for microphone and
+  system audio. In a recorded 30-second file comparison, only this setting returned both source
+  and translated text; live microphone behavior and translation accuracy remain unverified.
+- Added diagnostic milestones once per connection without logging audio, transcripts, credentials,
+  or provider payloads.
+
+### Fixed
+
+- Forwarded the selected audio input source when starting direct GPT translation.
+- Added regression checks for explicit noise-reduction null and immediate transcript-delta delivery,
+  including rejection of output from a stopped session.
+
 ## 1.6.1 - 2026-08-22
 
 ### Added
