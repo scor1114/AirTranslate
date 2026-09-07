@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import OSLog
 
 enum RealtimeAudioTransportProvider: String, Sendable {
     case openAI
@@ -28,6 +29,14 @@ struct RealtimeAudioTransportDegradation: Equatable, Sendable {
 }
 
 final class OpenAIRealtimeTranscriber: @unchecked Sendable {
+    private static let logger = Logger(subsystem: "dev.appcaster.AirTranslate", category: "OpenAIRealtime")
+    private enum TranslationMilestone: String {
+        case sessionUpdateSent, sessionCreated, sessionUpdated
+        case audioConverted, audioConversionEmpty, audioSent
+        case sourceTranscript, translatedTranscript, outputAudio
+        case serverError, receiveFailed, binaryFrameIgnored, invalidJSON
+    }
+    private var loggedTranslationMilestones = Set<TranslationMilestone>()
     private static let realtimeAudioSampleRate = 24_000
     private static let maxAudioChunkMilliseconds = 80
     private static let bytesPerPCM16Sample = 2
@@ -216,13 +225,17 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         )
     }
 
-    func startRealtimeTranslationOnly(language: LanguageOption, model: OpenAIRealtimeTranslationModel) async throws {
+    func startRealtimeTranslationOnly(
+        language: LanguageOption,
+        model: OpenAIRealtimeTranslationModel,
+        audioInputSource: AudioInputSource
+    ) async throws {
         try await start(
             languages: [language],
             modelID: model.apiModelID,
             outputMode: .translationOnly,
             isEnabled: model.usesRealtimeAudioTranslation,
-            audioInputSource: .microphone
+            audioInputSource: audioInputSource
         )
     }
 
@@ -321,6 +334,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         conversionLock.lock()
         let audioChunks = pcm16Base64AudioChunks(from: sampleBuffer)
         conversionLock.unlock()
+        logTranslationMilestone(audioChunks.isEmpty ? .audioConversionEmpty : .audioConverted, generation: generation)
 
         for audio in audioChunks {
             let event = OpenAIRealtimeAudioAppendEvent(
@@ -339,6 +353,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
 
             webSocketTask.send(.string(text)) { [weak self] error in
                 self?.releaseAudioSendSlot(generation: generation)
+                if error == nil { self?.logTranslationMilestone(.audioSent, generation: generation) }
                 guard let error, let self else { return }
                 self.publishFailureIfCurrent(
                     Self.publicConnectionError(from: error),
@@ -462,6 +477,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         outstandingTranscriptionCommitIDs.removeAll()
         droppedAudioChunkCount = 0
         droppedAudioByteCount = 0
+        loggedTranslationMilestones.removeAll()
         stateLock.unlock()
         waitForRealtimeTranscriptDeliveries(generation: stoppingGeneration)
         terminalTranscripts.forEach { text in
@@ -701,7 +717,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             guard let language = languages.first else {
                 throw OpenAIRealtimeTranscriberError.connectionFailed
             }
-            data = try Self.translationSessionUpdateData(language: language)
+            data = try Self.translationSessionUpdateData(language: language, audioInputSource: audioInputSource)
         }
         guard let text = String(data: data, encoding: .utf8) else { return }
         try await send(
@@ -709,6 +725,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             webSocketTask: webSocketTask,
             generation: generation
         )
+        logTranslationMilestone(.sessionUpdateSent, generation: generation)
     }
 
     static func transcriptionSessionUpdateData(
@@ -763,7 +780,10 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         try JSONEncoder().encode(OpenAIRealtimeAudioCommitEvent())
     }
 
-    static func translationSessionUpdateData(language: LanguageOption) throws -> Data {
+    static func translationSessionUpdateData(
+        language: LanguageOption,
+        audioInputSource: AudioInputSource = .microphone
+    ) throws -> Data {
         let event = OpenAIRealtimeTranslationSessionUpdateEvent(
             session: OpenAIRealtimeTranslationSession(
                 audio: OpenAIRealtimeTranslationAudio(
@@ -771,7 +791,8 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                         transcription: OpenAIRealtimeTranslationInputTranscription(
                             model: OpenAIRealtimeTranscriptionModel.gptRealtimeWhisper.rawValue
                         ),
-                        noiseReduction: OpenAIRealtimeNoiseReduction(type: "near_field")
+                        // Both filters suppressed the low-level meeting sample; preserve source audio.
+                        noiseReduction: nil
                     ),
                     output: OpenAIRealtimeTranslationAudioOutput(
                         language: language.openAILanguageCode
@@ -817,10 +838,14 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             }
             do {
                 let message = try await webSocketTask.receive()
-                guard case let .string(text) = message else { continue }
+                guard case let .string(text) = message else {
+                    logTranslationMilestone(.binaryFrameIgnored, generation: generation)
+                    continue
+                }
                 handleEventText(text, generation: generation)
             } catch {
                 guard !Task.isCancelled else { return }
+                logTranslationMilestone(.receiveFailed, generation: generation)
                 publishFailureIfCurrent(
                     Self.publicConnectionError(from: error),
                     generation: generation
@@ -841,7 +866,10 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         guard isCurrentGeneration(generation) else { return }
         guard let data = text.data(using: .utf8),
               let event = try? JSONDecoder().decode(OpenAIRealtimeTranscriptionEvent.self, from: data)
-        else { return }
+        else {
+            logTranslationMilestone(.invalidJSON, generation: generation)
+            return
+        }
 
         stateLock.lock()
         guard connectionGeneration == generation else {
@@ -861,6 +889,10 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         #endif
 
         switch event.type {
+        case "session.created":
+            logTranslationMilestone(.sessionCreated, generation: generation)
+        case "session.updated":
+            logTranslationMilestone(.sessionUpdated, generation: generation)
         case "input_audio_buffer.committed",
             "session.input_audio_buffer.committed":
             guard let itemID = event.itemID, !itemID.isEmpty else { return }
@@ -892,6 +924,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                     generation: generation
                 )
             case .translationOnly:
+                logTranslationMilestone(.sourceTranscript, generation: generation)
                 appendRealtimeTranslationInputDelta(
                     delta,
                     generation: generation
@@ -930,6 +963,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             guard outputMode == .translationOnly,
                   let delta = event.delta,
                   !delta.isEmpty else { return }
+            logTranslationMilestone(.translatedTranscript, generation: generation)
             appendRealtimeTranslationOutputDelta(
                 delta,
                 generation: generation
@@ -947,8 +981,10 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             guard outputMode == .translationOnly,
                   let delta = event.delta,
                   !delta.isEmpty else { return }
+            logTranslationMilestone(.outputAudio, generation: generation)
             publishOutputAudioIfCurrent(delta, generation: generation)
         case "error":
+            logTranslationMilestone(.serverError, generation: generation)
             if outputMode == .transcription,
                Self.isRecoverableTranscriptionCommitError(event.error) {
                 clearOutstandingTranscriptionCommitWaits(generation: generation)
@@ -962,6 +998,16 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         default:
             return
         }
+    }
+
+    // Bounded to one entry per milestone per connection. Never log audio, text, keys, or server payloads.
+    private func logTranslationMilestone(_ milestone: TranslationMilestone, generation: UInt64) {
+        let shouldLog = stateLock.withLock {
+            connectionGeneration == generation && outputMode == .translationOnly
+                && loggedTranslationMilestones.insert(milestone).inserted
+        }
+        guard shouldLog else { return }
+        Self.logger.notice("translation generation=\(generation) milestone=\(milestone.rawValue, privacy: .public)")
     }
 
     nonisolated static func publicConnectionError(from error: Error) -> Error {
@@ -1675,6 +1721,11 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     }
 
     #if DEBUG
+    func prepareRealtimeTranslationForTesting() {
+        stop()
+        stateLock.withLock { outputMode = .translationOnly }
+    }
+
     var isTranscriptionCommitPendingForTesting: Bool {
         stateLock.withLock { isTranscriptionCommitPending }
     }
@@ -1997,11 +2048,22 @@ private struct OpenAIRealtimeTranslationAudio: Encodable {
 
 private struct OpenAIRealtimeTranslationAudioInput: Encodable {
     let transcription: OpenAIRealtimeTranslationInputTranscription
-    let noiseReduction: OpenAIRealtimeNoiseReduction
+    let noiseReduction: OpenAIRealtimeNoiseReduction?
 
     private enum CodingKeys: String, CodingKey {
         case transcription
         case noiseReduction = "noise_reduction"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(transcription, forKey: .transcription)
+        // Omitting the field leaves a provider default unchanged; null explicitly disables it.
+        if let noiseReduction {
+            try container.encode(noiseReduction, forKey: .noiseReduction)
+        } else {
+            try container.encodeNil(forKey: .noiseReduction)
+        }
     }
 }
 

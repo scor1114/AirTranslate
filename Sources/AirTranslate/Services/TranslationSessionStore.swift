@@ -2192,7 +2192,8 @@ final class TranslationSessionStore {
         } else if configuration.openAITranslationModel.usesRealtimeAudioTranslation {
             try await openAITranscriber.startRealtimeTranslationOnly(
                 language: configuration.targetLanguage,
-                model: configuration.openAITranslationModel
+                model: configuration.openAITranslationModel,
+                audioInputSource: configuration.audioInputSource
             )
         } else if configuration.openAITranscriptionModel.isEnabled {
             try await openAITranscriber.start(
