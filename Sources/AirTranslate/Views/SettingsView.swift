@@ -12,6 +12,9 @@ struct SettingsView: View {
     @State private var geminiAPIKey = ""
     @State private var geminiKeyFeedback: APIKeyFeedback?
     @State private var isConfirmingGeminiKeyRemoval = false
+    @State private var azureAPIKey = ""
+    @State private var azureKeyFeedback = ""
+    @State private var confirmAzureRemoval = false
     @State private var metaAPIKey = ""
     @State private var metaKeyFeedback: APIKeyFeedback?
     @State private var isConfirmingMetaKeyRemoval = false
@@ -210,6 +213,18 @@ struct SettingsView: View {
                 }
             }
 
+            if processingModeSelection.wrappedValue == .azure {
+                SettingsNoticeRow(text: AzureMAICopy.detail, systemImage: "waveform")
+                if let azureConfigurationIssue {
+                    SettingsNoticeActionRow(
+                        text: azureConfigurationIssue,
+                        systemImage: "key",
+                        actionTitle: AzureMAICopy.configureSpeech
+                    ) {
+                        selectedCategory.wrappedValue = .apiKeys
+                    }
+                }
+            }
             if processingModeSelection.wrappedValue == .meta {
                 SettingsControlRow(
                     title: AppText.metaScribe,
@@ -386,6 +401,7 @@ struct SettingsView: View {
             apiSettings
             geminiSettings
             metaSettings
+            azureSettings
         }
     }
 
@@ -922,6 +938,51 @@ struct SettingsView: View {
         }
     }
 
+    private var azureSettings: some View {
+        SettingsGroup(title: AzureMAICopy.title) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(AzureMAICopy.detail).font(.callout).foregroundStyle(.secondary)
+                TextField(AzureMAICopy.endpointLabel, text: $session.azureSpeechEndpoint)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel(AzureMAICopy.endpointLabel)
+                    .disabled(isSessionConfigurationLocked)
+                Text("https://YourResourceName.cognitiveservices.azure.com")
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                SecureField(AzureMAICopy.apiKeyLabel, text: $azureAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel(AzureMAICopy.apiKeyLabel)
+                    .disabled(isSessionConfigurationLocked)
+                HStack {
+                    Button(AzureMAICopy.saveKey) {
+                        do {
+                            try session.saveAzureSpeechAPIKey(azureAPIKey)
+                            azureAPIKey = ""
+                            azureKeyFeedback = AzureMAICopy.keySaved
+                        } catch { azureKeyFeedback = error.localizedDescription }
+                    }
+                    .disabled(isSessionConfigurationLocked || azureAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button(AzureMAICopy.removeKey, role: .destructive) {
+                        confirmAzureRemoval = true
+                    }
+                    .disabled(isSessionConfigurationLocked || !session.hasAzureSpeechAPIKey)
+                    .confirmationDialog(AzureMAICopy.removeKeyConfirmation, isPresented: $confirmAzureRemoval) {
+                        Button(AzureMAICopy.removeKey, role: .destructive) {
+                            do {
+                                try session.removeAzureSpeechAPIKey()
+                                azureAPIKey = ""
+                                azureKeyFeedback = AzureMAICopy.keyRemoved
+                            } catch { azureKeyFeedback = error.localizedDescription }
+                        }
+                        Button(AppText.cancel, role: .cancel) {}
+                    }
+                }
+                Text(azureSettingsStatusText)
+                    .font(.caption).accessibilityLabel(azureSettingsStatusText)
+                Link(AzureMAICopy.documentation, destination: URL(string: "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/mai-transcribe")!)
+            }.padding(.vertical, 10)
+        }
+    }
+
     private var metaSettings: some View {
         SettingsGroup(title: AppText.metaScribe) {
             VStack(alignment: .leading, spacing: 12) {
@@ -1024,6 +1085,7 @@ struct SettingsView: View {
     }
 
     private var selectedProcessingMode: SettingsProcessingMode {
+        if session.isUsingAzureMAI { return .azure }
         if session.isUsingMetaScribe {
             return .meta
         }
@@ -1037,6 +1099,27 @@ struct SettingsView: View {
             return .gemini
         }
         return .apple
+    }
+
+    private var azureConfigurationIssue: String? {
+        let hasValidEndpoint = (try? AzureMAITranscriber.endpointURL(session.azureSpeechEndpoint)) != nil
+        switch (hasValidEndpoint, session.hasAzureSpeechAPIKey) {
+        case (false, false):
+            return AzureMAICopy.configurationRequired
+        case (false, true):
+            return AzureMAICopy.endpointRequired
+        case (true, false):
+            return AzureMAICopy.keyRequired
+        case (true, true):
+            return nil
+        }
+    }
+
+    private var azureSettingsStatusText: String {
+        if !azureKeyFeedback.isEmpty {
+            return azureKeyFeedback
+        }
+        return azureConfigurationIssue ?? AzureMAICopy.keyConfiguredUnverified
     }
 
     private var isSessionConfigurationLocked: Bool {
@@ -1077,6 +1160,8 @@ struct SettingsView: View {
                 session.useGPTTranscriptionMode()
             case .gemini:
                 session.usePreferredGeminiMode()
+            case .azure:
+                session.useAzureMAIMode()
             case .meta:
                 session.useMetaScribeMode()
             }
@@ -1317,6 +1402,7 @@ private enum SettingsProcessingMode: String, CaseIterable, Identifiable {
     case gptTranscription
     case gemini
     case meta
+    case azure
 
     var id: String { rawValue }
 
@@ -1340,6 +1426,8 @@ private enum SettingsProcessingMode: String, CaseIterable, Identifiable {
             )
         case .gemini:
             "Gemini"
+        case .azure:
+            "Azure MAI"
         case .meta:
             "Meta"
         }
@@ -1450,10 +1538,10 @@ private enum SettingsCopy {
         korean: "기본 번역 방식과 언어 동작을 설정합니다."
     )
     static let apiKeysDetail = AppText.localized(
-        english: "Save provider keys for OpenAI, Gemini Live, and Meta Scribe modes.",
-        korean: "OpenAI, Gemini Live, Meta 스크라이브 모드에 사용할 키를 저장합니다.",
-        japanese: "OpenAI、Gemini Live、Meta Scribeモードで使用するキーを保存します。",
-        chineseSimplified: "保存 OpenAI、Gemini Live 和 Meta Scribe 模式使用的密钥。"
+        english: "Save provider keys for OpenAI, Gemini Live, Meta Scribe, and Azure MAI modes.",
+        korean: "OpenAI, Gemini Live, Meta 스크라이브, Azure MAI 모드에 사용할 키를 저장합니다.",
+        japanese: "OpenAI、Gemini Live、Meta Scribe、Azure MAIモードで使用するキーを保存します。",
+        chineseSimplified: "保存 OpenAI、Gemini Live、Meta Scribe 和 Azure MAI 模式使用的密钥。"
     )
     static let audioDetail = AppText.localized(
         english: "Choose where AirTranslate listens from.",
@@ -1486,10 +1574,10 @@ private enum SettingsCopy {
     static let modeSettings = AppText.localized(english: "Mode Settings", korean: "모드 설정")
     static let processingEngine = AppText.localized(english: "Processing Mode", korean: "처리 방식")
     static let processingEngineDetail = AppText.localized(
-        english: "Choose exactly one active engine: local Apple mode, GPT Realtime, GPT Transcription, Gemini Live, or Meta Scribe.",
-        korean: "Apple 기본 모드, GPT Realtime, GPT 전사, Gemini Live, Meta 스크라이브 중 하나만 활성화합니다.",
-        japanese: "Appleローカルモード、GPT Realtime、GPT文字起こし、Gemini Live、Meta Scribeから1つだけ有効にします。",
-        chineseSimplified: "仅启用一种处理方式：Apple 本地模式、GPT Realtime、GPT 转写、Gemini Live 或 Meta Scribe。"
+        english: "Choose exactly one active engine: local Apple mode, GPT Realtime, GPT Transcription, Gemini Live, Meta Scribe, or Azure MAI.",
+        korean: "Apple 기본 모드, GPT Realtime, GPT 전사, Gemini Live, Meta 스크라이브, Azure MAI 중 하나만 활성화합니다.",
+        japanese: "Appleローカルモード、GPT Realtime、GPT文字起こし、Gemini Live、Meta Scribe、Azure MAIから1つだけ有効にします。",
+        chineseSimplified: "仅启用一种处理方式：Apple 本地模式、GPT Realtime、GPT 转写、Gemini Live、Meta Scribe 或 Azure MAI。"
     )
     static let enterOpenAIAPIKey = AppText.localized(
         english: "Enter OpenAI API key",

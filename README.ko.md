@@ -31,7 +31,7 @@ AirTranslate는 Mac에서 재생되는 소리를 실시간으로 기록하고 �
 
 사용자용 소개, 설치 안내, 다운로드 경로는 [AirTranslate 공식 안내 사이트](https://himomohi.github.io/AirTranslate/)에서 볼 수 있습니다.
 
-기본 처리 흐름은 Apple 프레임워크를 사용합니다. GPT Realtime, Gemini Live Translate, Meta Scribe는 선택형 API 기반 모드이며, 사용자가 직접 해당 API 키를 입력했을 때만 사용할 수 있습니다.
+기본 처리 흐름은 Apple 프레임워크를 사용합니다. GPT Realtime, Gemini Live Translate, Meta Scribe, Azure MAI는 선택형 API 기반 모드이며, 사용자가 직접 해당 API 키와 필요한 경우 엔드포인트를 입력했을 때만 사용할 수 있습니다.
 
 ## 왜 AirTranslate인가
 
@@ -39,13 +39,23 @@ AirTranslate는 Mac에서 재생되는 소리를 실시간으로 기록하고 �
 - **읽기 좋은 실시간 작업 공간:** 원문과 번역을 나란히 유지합니다.
 - **플로팅 자막:** 다른 앱 위에 자막을 띄워 영상이나 회의를 보며 확인할 수 있습니다.
 - **Apple 기본 처리:** Apple Speech와 Apple Translation을 기본 경로로 유지합니다.
-- **선택형 API 모드:** 필요한 경우에만 OpenAI Realtime Translation, Gemini Live Translate 또는 Meta Scribe를 켭니다.
-- **Keychain 저장:** OpenAI, Gemini, Meta API 키는 사용자가 입력하고 macOS Keychain에 저장합니다.
-- **일반 텍스트 기록:** 저장된 기록은 Mac 안의 `.txt` 파일로 남습니다.
+- **선택형 API 모드:** 필요한 경우에만 OpenAI Realtime Translation, Gemini Live Translate, Meta Scribe 또는 Azure MAI를 켭니다.
+- **Keychain 저장:** OpenAI, Gemini, Meta, Azure Speech API 키는 사용자가 입력하고 macOS Keychain에 저장합니다.
+- **선택형 일반 텍스트 기록:** 기록 파일 저장은 기본으로 꺼져 있으며 설정에서 켤 수 있습니다. 저장된 기록은 Mac 안의 `.txt` 파일로 남습니다.
 
 ![AirTranslate demo](docs/assets/airtranslate-readme-demo.gif)
 
 > "Turn any Mac audio into live captions and translation, right where you are watching."
+
+## 1.8.0 주요 변경사항
+
+- **기록 파일 저장은 선택형:** **기록 파일 저장**은 기본으로 꺼져 있습니다. 설정 > 기록에서 켜기 전까지 세션 텍스트는 메모리에만 남으며, 중지하거나 앱을 종료해도 기본값에서는 `.txt` 파일을 만들지 않습니다.
+- **Azure MAI 프리뷰:** Azure MAI는 새로운 선택형 전사 모드입니다. Azure Speech 엔드포인트와 API 키를 입력한 뒤 오디오를 5초 구간으로 Azure Speech MAI-Transcribe-2에 보내고 Apple Translation으로 자막을 번역합니다. Azure 사용료는 별도이며, 실제 Azure 음성 검증은 사용자의 리소스에 따라 별도로 확인해야 합니다.
+- **Apple 자막의 짧은 발화와 반복 문장 보존:** Apple 기본 모드는 오디오 구간, 개정 번호, 최종 결과 메타데이터를 추적해 `Yes. No.` 같은 짧은 발화와 나중에 다시 나온 같은 문장을 별도 발화로 표시하고 저장합니다.
+- **읽기 쉬운 Stage와 플로팅 자막 교체:** 첫 자막과 뒤에 이어지는 글자는 즉시 표시하고, 전체 교체는 짧게 보류한 뒤 한 번에 바꿔 실시간 자막을 읽기 쉽게 만듭니다. 전체 속도가 빨라졌다는 의미는 아닙니다. 플로팅 자막의 오래된 번역 만료 시간은 지연된 작업 시작이 아니라 요청 마감 시점 기준으로 계산합니다.
+- **키보드로 접근 가능한 복사:** 기록 영역 복사 버튼은 포인터, 키보드 포커스, 접근성 포커스에서 표시됩니다.
+
+전체 내용은 [AirTranslate 1.8.0 릴리즈 노트](https://github.com/himomohi/AirTranslate/releases/tag/v1.8.0)에서 확인할 수 있습니다.
 
 ## 1.7.1 주요 변경사항
 
@@ -104,7 +114,7 @@ AirTranslate는 Mac에서 재생되는 소리를 실시간으로 기록하고 �
 ## 1.5.0 주요 변경사항
 
 - **Apple 기본 모드 수명주기 강화:** Apple 기본 모드는 계속 로컬 우선 기본 경로이며, 이전 시작 시도의 늦은 권한 응답·warm-up·캡처 콜백이 새 세션을 바꾸지 못하게 합니다.
-- **외부 중지의 정상 처리:** 앱 밖에서 macOS 시스템 오디오 캡처를 중지해도 기록을 저장하고 세션 잠금을 풀어 다시 시작할 수 있습니다.
+- **외부 중지의 정상 처리:** 앱 밖에서 macOS 시스템 오디오 캡처를 중지해도 세션 잠금을 풀어 다시 시작할 수 있으며, 기록 파일 저장을 켠 경우에만 기록을 저장합니다.
 - **무음 입력 유실 방지:** 음성 입력 backpressure는 조용히 버리는 대신 사용자에게 보이는 제어된 중지로 처리합니다.
 - **선택형 GPT 전사:** OpenAI API 키를 제공한 경우에만 `gpt-live-transcribe`로 원문 자막을 만들 수 있으며, GPT 실시간 번역과는 별도 모드입니다.
 
@@ -160,10 +170,11 @@ AirTranslate는 빠른 선택과 상세 설정을 분리합니다.
 | GPT 전사 | OpenAI 원문 자막 | 선택형 모드에서 OpenAI API 키를 제공하면 `gpt-live-transcribe`로 번역 없이 원문 자막을 만듭니다. |
 | Gemini Live | Gemini 3.5 Live Translate 또는 원문 전사 | Gemini 3.5 Live Translate는 원문/번역 전사를 표시하고, Gemini 3.5 Transcribe Live는 자동 언어 감지 원문 자막만 표시합니다. 두 모드 모두 사용자가 제공한 Gemini API 키가 필요합니다. |
 | Meta Scribe | 화자 라벨이 있는 다국어 자막 | Muse Voice Transcribe로 화자 라벨과 25개 언어 코드 스위칭 실시간 전사를 만든 뒤 AirTranslate의 기존 번역 레이어를 사용합니다. Meta API 키가 필요합니다. |
+| Azure MAI | 프리뷰 클라우드 전사와 Apple 번역 자막 | Azure Speech 엔드포인트와 키를 설정한 뒤 오디오를 5초 구간으로 Azure MAI-Transcribe-2에 보내고 Apple Translation으로 자막을 생성합니다. Azure 사용료는 별도입니다. |
 | 전사만 | 번역 없이 원문 자막만 필요할 때 | Translation 없이 원문 기록만 남깁니다. |
 | LIVE 번역 | 번역 스트림을 직접 만들고 싶을 때 | 선택한 API 제공자의 실시간 번역 모델이 번역 결과를 직접 생성하는 경로를 사용합니다. |
 
-GPT, Gemini, Meta 모델 세부 선택, API 키 입력, 기록 다듬기, 음성 출력은 톱니바퀴 설정 창에서 관리합니다. 일상적인 캡처 제어는 Stage 아래 떠 있는 콘솔 바에 있습니다.
+GPT, Gemini, Meta, Azure 제공자 세부 설정, API 키 입력, 기록 다듬기, 음성 출력은 톱니바퀴 설정 창에서 관리합니다. 일상적인 캡처 제어는 Stage 아래 떠 있는 콘솔 바에 있습니다.
 
 ## 개인정보와 API 키
 
@@ -173,11 +184,12 @@ AirTranslate는 계정 시스템이나 개발자 운영 중계/백엔드 서버�
 - GPT 모드 또는 선택형 GPT 전사 모드를 켰을 때만 필요한 오디오나 텍스트가 사용자의 OpenAI API 키로 OpenAI API에 직접 전송됩니다.
 - Gemini Live Translate 또는 Gemini 3.5 Transcribe Live를 켰을 때만 필요한 오디오가 사용자의 Gemini API 키로 Google Gemini API에 직접 전송됩니다.
 - Meta Scribe를 켰을 때만 필요한 오디오가 사용자의 Meta API 키로 Meta Muse Voice Transcribe API에 직접 전송됩니다.
-- OpenAI, Gemini, Meta API 키는 사용자가 제공해 Keychain에 저장하며, 앱에 하드코딩하거나 커밋하거나 릴리즈 패키지에 포함하지 않습니다.
+- Azure MAI를 켰을 때만 오디오가 사용자의 Azure Speech API 키와 엔드포인트로 Azure Speech MAI-Transcribe-2에 5초 구간으로 전송되며, 자막 번역은 Apple Translation을 사용합니다.
+- OpenAI, Gemini, Meta, Azure Speech API 키는 사용자가 제공해 Keychain에 저장하며, 앱에 하드코딩하거나 커밋하거나 릴리즈 패키지에 포함하지 않습니다.
 - API 키는 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` 옵션으로 macOS Keychain에 저장합니다.
 - 저장된 기록은 사용자 Mac의 일반 텍스트 파일입니다.
 
-API 키가 필요하면 [OpenAI API 키 페이지](https://platform.openai.com/api-keys), [Google AI Studio API 키 페이지](https://aistudio.google.com/app/apikey) 또는 [Meta 개발자 포털](https://dev.meta.ai)에서 키를 만든 뒤 AirTranslate 설정 창에 붙여 넣으세요.
+API 키가 필요하면 [OpenAI API 키 페이지](https://platform.openai.com/api-keys), [Google AI Studio API 키 페이지](https://aistudio.google.com/app/apikey), [Meta 개발자 포털](https://dev.meta.ai) 또는 [Azure 포털](https://portal.azure.com/)에서 키를 만든 뒤 AirTranslate 설정 창에 붙여 넣으세요.
 
 ## Apple 번역 언어팩
 
@@ -215,7 +227,7 @@ ScreenCaptureKit의 시스템 오디오 캡처 경로 때문에 화면 기록 �
 AirTranslate는 Apache-2.0 라이선스의 오픈소스 프로젝트입니다. DMG 파일은 macOS 사용자가 더 쉽게 설치할 수 있도록 추가로 제공되는 설치 패키지이며, 소스코드 공개를 대체하는 것이 아닙니다. 소스코드, 빌드 스크립트, 릴리즈 자료, LICENSE, NOTICE 파일은 모두 이 저장소에 공개되어 있습니다.
 
 - [AirTranslate.dmg 다운로드](https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg)
-- [AirTranslate-1.7.1.zip 다운로드](https://github.com/himomohi/AirTranslate/releases/download/v1.7.1/AirTranslate-1.7.1.zip)
+- [AirTranslate-1.8.0.zip 다운로드](https://github.com/himomohi/AirTranslate/releases/download/v1.8.0/AirTranslate-1.8.0.zip)
 - [AirTranslate.dmg.sha256 다운로드](https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg.sha256)
 - [버전 히스토리 보기](Release/VERSION-HISTORY.md)
 
@@ -241,6 +253,7 @@ cat AirTranslate.dmg.sha256
 - 선택 사항: GPT 모드 또는 GPT 전사용 OpenAI API 키
 - 선택 사항: Gemini Live 모드용 Gemini API 키
 - 선택 사항: Meta Scribe 모드용 Meta API 키
+- 선택 사항: Azure MAI 모드용 Azure Speech API 키와 엔드포인트
 
 ## 소스에서 빌드
 
@@ -279,12 +292,12 @@ swift test
 
 1. 원문 언어와 번역 언어를 선택합니다.
 2. 방향을 바꾸고 싶으면 가운데 언어 바꾸기 버튼을 누릅니다.
-3. 콘솔 바에서 Apple 기본 모드, GPT 모드, Gemini Live 또는 Meta Scribe를 선택합니다.
-4. API 기반 모드에서 안내가 나오면 설정 창에 OpenAI, Gemini 또는 Meta API 키를 입력합니다.
+3. 콘솔 바에서 Apple 기본 모드, GPT 모드, Gemini Live, Meta Scribe 또는 Azure MAI를 선택합니다.
+4. API 기반 모드에서 안내가 나오면 설정 창에 OpenAI, Gemini, Meta 또는 Azure Speech API 키와 엔드포인트를 입력합니다.
 5. 시작 버튼을 누릅니다.
 6. Mac에서 회의, 강의, 영상, 인터뷰, 스트림 오디오를 재생합니다.
 7. 메인 작업 공간이나 플로팅 자막 창에서 원문과 번역을 확인합니다.
-8. 중지하면 현재 기록이 저장됩니다.
+8. 설정 > 기록에서 **기록 파일 저장**을 켠 경우, 중지하면 현재 기록이 저장됩니다.
 
 ## 저장된 기록
 
@@ -293,6 +306,8 @@ swift test
 ```text
 ~/Library/Application Support/AirTranslate/Transcripts/*.txt
 ```
+
+기록 파일 저장은 기본으로 꺼져 있습니다. 설정 > 기록에서 **기록 파일 저장**을 켜면 저장됩니다. 꺼져 있을 때는 세션 텍스트가 메모리에만 남고, 중지하거나 앱을 종료해도 `.txt` 파일을 만들지 않습니다.
 
 원문과 번역을 함께 저장할 때는 `_original.txt`, `_translation.txt` 파일로 분리 저장하고, 앱의 저장소 UI에서는 하나의 묶음으로 보여줍니다.
 
@@ -324,7 +339,8 @@ docs/assets/
 - `AppleTranslationService`: Apple Translation 작업을 격리합니다.
 - `OpenAIRealtimeTranscriber`: 선택형 OpenAI 실시간 번역과 전사 이벤트를 처리합니다.
 - `GeminiLiveTranslationService`: 선택형 Gemini Live Translate 웹소켓 세션을 처리합니다.
-- `OpenAIAPIKeyStore` / `GeminiAPIKeyStore`: API 키를 macOS Keychain에 저장합니다.
+- `AzureMAITranscriber`: 선택형 Azure MAI-Transcribe-2 REST 전사 구간을 처리합니다.
+- `OpenAIAPIKeyStore` / `GeminiAPIKeyStore` / `MetaAPIKeyStore` / `AzureSpeechAPIKeyStore`: API 키를 macOS Keychain에 저장합니다.
 - `TranslationSessionStore`: 캡처, 기록 상태, 번역, 저장, 음성 출력을 조율합니다.
 - `SidebarView`: 언어, 처리 방식, 세션, 설정 진입점을 제공합니다.
 - `CaptionBoardView`: 실시간 기록, 번역, 컨트롤, 오디오 미터를 표시합니다.
@@ -335,4 +351,8 @@ docs/assets/
 
 AirTranslate는 [Apache License 2.0](LICENSE)로 공개됩니다. 저작권 표기는 [NOTICE](NOTICE)에 있습니다.
 
-AirTranslate는 독립 오픈소스 프로젝트이며 Apple, OpenAI 또는 Google과 제휴한 프로젝트가 아닙니다.
+AirTranslate는 독립 오픈소스 프로젝트이며 Apple, OpenAI, Google, Meta 또는 Microsoft와 제휴한 프로젝트가 아닙니다.
+
+## 선택형 Azure MAI 전사
+
+**설정 → 일반 → Azure MAI**를 선택하고 **API 키**에서 Azure Speech 리소스 엔드포인트와 키를 설정합니다. 선택한 원문 언어의 오디오를 MAI-Transcribe-2에 5초 구간으로 보내고 Apple 번역으로 자막을 생성하는 프리뷰 옵션입니다. 기존 엔진 기본값은 유지되며 Azure 사용료는 별도입니다. 중지 시 마지막 구간을 기다리며 구간 경계에서 단어가 잘릴 수 있습니다. 지원되는 Azure 리소스와 실제 음성 검증이 필요합니다. 키는 Keychain에 저장합니다.

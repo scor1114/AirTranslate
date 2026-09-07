@@ -2,6 +2,7 @@
 set -euo pipefail
 
 MODE="${1:-run}"
+BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-debug}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$ROOT_DIR/script"
@@ -28,8 +29,8 @@ cd "$ROOT_DIR"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
-swift build
-BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
+swift build -c "$BUILD_CONFIGURATION"
+BUILD_BINARY="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS"
@@ -59,7 +60,11 @@ else
 fi
 
 open_app() {
-  /usr/bin/nohup "$APP_BINARY" >"$DIST_DIR/$APP_NAME.log" 2>&1 &
+  # 앱 번들로 실행해 설치본과 개발본의 프로세스·권한 식별을 일치시킨다.
+  /usr/bin/open -n --stdout "$DIST_DIR/$APP_NAME.log" --stderr "$DIST_DIR/$APP_NAME.log" \
+    --env "AIRTRANSLATE_LATENCY_TRACE=${AIRTRANSLATE_LATENCY_TRACE:-0}" \
+    --env "AIRTRANSLATE_PRODUCT_HUNT_SCREENSHOTS=${AIRTRANSLATE_PRODUCT_HUNT_SCREENSHOTS:-0}" \
+    "$APP_BUNDLE"
 }
 
 verify_running_app() {

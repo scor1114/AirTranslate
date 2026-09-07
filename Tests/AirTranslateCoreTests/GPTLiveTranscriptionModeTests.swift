@@ -576,8 +576,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func openAIProxyFailureStopsTheMatchingStoreGeneration() async {
-        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+    func openAIProxyFailureStopsTheMatchingStoreGeneration() async throws {
+        let fixture = try makeTranscriptionSession()
+        defer { cleanup(fixture) }
+        let session = fixture.session
         let pipeline = session.activateLiveCallbackPipelineForTesting()
 
         pipeline.openAITranscriber.handleEventText(#"{"type":"error"}"#)
@@ -589,8 +591,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func pendingTimelineOverflowStopsTheActiveStoreGeneration() async {
-        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+    func pendingTimelineOverflowStopsTheActiveStoreGeneration() async throws {
+        let fixture = try makeTranscriptionSession()
+        defer { cleanup(fixture) }
+        let session = fixture.session
         let pipeline = session.activateLiveCallbackPipelineForTesting()
 
         for index in 0...OpenAIRealtimeTranscriber.maximumTrackedRealtimeTimelineItemCount {
@@ -606,8 +610,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func itemTranscriptionFailureDoesNotStopButConnectionFailureStillDoes() async {
-        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+    func itemTranscriptionFailureDoesNotStopButConnectionFailureStillDoes() async throws {
+        let fixture = try makeTranscriptionSession()
+        defer { cleanup(fixture) }
+        let session = fixture.session
         let pipeline = session.activateLiveCallbackPipelineForTesting()
 
         pipeline.openAITranscriber.handleEventText(
@@ -624,8 +630,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func storeStopFlushesLastTerminalBeforeTranscriptTeardown() {
-        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+    func storeStopFlushesLastTerminalBeforeTranscriptTeardown() throws {
+        let fixture = try makeTranscriptionSession()
+        defer { cleanup(fixture) }
+        let session = fixture.session
         let pipeline = session.activateLiveCallbackPipelineForTesting()
 
         pipeline.openAITranscriber.handleEventText(
@@ -639,8 +647,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func storeStopClaimsRegisteredTerminalPausedAfterDrainBeforeAutosave() async {
-        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+    func storeStopClaimsRegisteredTerminalPausedAfterDrainBeforeAutosave() async throws {
+        let fixture = try makeTranscriptionSession()
+        defer { cleanup(fixture) }
+        let session = fixture.session
         let pipeline = session.activateLiveCallbackPipelineForTesting()
         let transcriber = pipeline.openAITranscriber
         let deliveryPause = RealtimeTranscriptDeliveryPause()
@@ -670,8 +680,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func storeStopFlushesItemIDLessTerminalBeforeAutosave() {
-        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+    func storeStopFlushesItemIDLessTerminalBeforeAutosave() throws {
+        let fixture = try makeTranscriptionSession()
+        defer { cleanup(fixture) }
+        let session = fixture.session
         let pipeline = session.activateLiveCallbackPipelineForTesting()
 
         pipeline.openAITranscriber.handleEventText(
@@ -686,8 +698,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func staleProxyRecognitionCannotPolluteRestartedStoreGeneration() async {
-        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+    func staleProxyRecognitionCannotPolluteRestartedStoreGeneration() async throws {
+        let fixture = try makeTranscriptionSession()
+        defer { cleanup(fixture) }
+        let session = fixture.session
         let firstPipeline = session.activateLiveCallbackPipelineForTesting()
         firstPipeline.openAITranscriber.handleEventText(
             #"{"type":"conversation.item.input_audio_transcription.completed","transcript":"queued-stale"}"#
@@ -712,8 +726,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func gptTranscriptionTransitionIsSourceOnlyAndRequiresOpenAIKey() {
-        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+    func gptTranscriptionTransitionIsSourceOnlyAndRequiresOpenAIKey() throws {
+        let fixture = try makeTranscriptionSession()
+        defer { cleanup(fixture) }
+        let session = fixture.session
         session.useGPTRealtimeMode()
         session.hasOpenAIAPIKey = false
 
@@ -733,8 +749,10 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func gptTranslationStillUsesTranslationModelAndWhisperSidecar() {
-        let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
+    func gptTranslationStillUsesTranslationModelAndWhisperSidecar() throws {
+        let fixture = try makeTranscriptionSession()
+        defer { cleanup(fixture) }
+        let session = fixture.session
 
         session.useGPTRealtimeMode()
 
@@ -745,31 +763,57 @@ struct GPTLiveTranscriptionModeTests {
 
     @Test
     @MainActor
-    func restorePreservesGPTTranscriptionMode() {
-        StandardUserDefaultsTestLock.shared.withLock {
-            let defaults = UserDefaults.standard
-            let keys = ["selectedModelID", "openAITranscriptionModelID", "openAITranslationModelID", "geminiTranslationModelID"]
-            let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.object(forKey: $0)) })
-            defer {
-                for key in keys {
-                    if let value = previous[key] {
-                        defaults.set(value, forKey: key)
-                    } else {
-                        defaults.removeObject(forKey: key)
-                    }
-                }
-            }
+    func restorePreservesGPTTranscriptionMode() throws {
+        let fixture = try makeTranscriptionSession { defaults in
             defaults.set(IntelligenceModel.appleSpeechOnly.rawValue, forKey: "selectedModelID")
             defaults.set(OpenAIRealtimeTranscriptionModel.gptLiveTranscribe.rawValue, forKey: "openAITranscriptionModelID")
             defaults.set(OpenAIRealtimeTranslationModel.gptRealtimeTranslate.rawValue, forKey: "openAITranslationModelID")
             defaults.set(GeminiTranslationModel.gemini35LiveTranslate.rawValue, forKey: "geminiTranslationModelID")
-
-            let session = TranslationSessionStore(modelAvailabilityProvider: { _, _ in [:] })
-
-            #expect(session.isUsingGPTTranscriptionMode)
-            #expect(session.openAITranslationModel == .off)
-            #expect(session.geminiTranslationModel == .off)
-            #expect(session.selectedModel == .appleSpeechOnly)
         }
+        defer { cleanup(fixture) }
+        let session = fixture.session
+
+        #expect(session.isUsingGPTTranscriptionMode)
+        #expect(session.openAITranslationModel == .off)
+        #expect(session.geminiTranslationModel == .off)
+        #expect(session.selectedModel == .appleSpeechOnly)
+    }
+
+    private struct TranscriptionSessionFixture {
+        let session: TranslationSessionStore
+        let defaults: UserDefaults
+        let defaultsSuiteName: String
+        let transcriptsDirectoryURL: URL
+    }
+
+    @MainActor
+    private func makeTranscriptionSession(
+        configureDefaults: (UserDefaults) -> Void = { _ in }
+    ) throws -> TranscriptionSessionFixture {
+        let defaultsSuiteName = "AirTranslateGPTLiveTranscriptionModeTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsSuiteName))
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        configureDefaults(defaults)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(defaultsSuiteName, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            settingsDefaults: defaults,
+            transcriptsDirectoryURL: directory
+        )
+        return TranscriptionSessionFixture(
+            session: session,
+            defaults: defaults,
+            defaultsSuiteName: defaultsSuiteName,
+            transcriptsDirectoryURL: directory
+        )
+    }
+
+    @MainActor
+    private func cleanup(_ fixture: TranscriptionSessionFixture) {
+        fixture.session.stop()
+        fixture.defaults.removePersistentDomain(forName: fixture.defaultsSuiteName)
+        try? FileManager.default.removeItem(at: fixture.transcriptsDirectoryURL)
     }
 }

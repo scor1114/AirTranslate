@@ -93,7 +93,7 @@ struct FloatingCaptionWindowView: View {
             } else if sourceText.isEmpty {
                 primaryBlock(AppText.noFloatingCaptionsYet, anchor: .bottom)
             } else {
-                primaryBlock("", anchor: .bottom)
+                primaryBlock(AppText.translating, anchor: .bottom, font: session.floatingCaptionTextSize.secondaryFont)
             }
         }
     }
@@ -115,7 +115,7 @@ struct FloatingCaptionWindowView: View {
         case .original, .originalAndTranslation:
             true
         case .translation:
-            !translationText.isEmpty || !noticeText.isEmpty || sourceText.isEmpty
+            true
         }
     }
 

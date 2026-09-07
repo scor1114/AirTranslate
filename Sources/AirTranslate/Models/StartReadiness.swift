@@ -3,6 +3,7 @@ import Foundation
 enum StartReadinessIssue: Equatable {
     case openAIAPIKeyMissing
     case geminiAPIKeyMissing
+    case azureConfigurationMissing
     case metaAPIKeyMissing
     case localAssetsChecking
     case localAssetsDownloadRequired

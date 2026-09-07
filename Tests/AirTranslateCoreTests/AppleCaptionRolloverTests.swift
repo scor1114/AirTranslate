@@ -118,8 +118,8 @@ struct AppleCaptionRolloverTests {
         let settingsDefaults = UserDefaults(suiteName: settingsSuiteName)!
         let session = TranslationSessionStore(
             modelAvailabilityProvider: { _, _ in [:] },
-            transcriptsDirectoryURL: directory,
-            settingsDefaults: settingsDefaults
+            settingsDefaults: settingsDefaults,
+            transcriptsDirectoryURL: directory
         )
         session.useTranscribeOnlyMode()
         session.sourceLanguage = .english

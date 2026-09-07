@@ -2,7 +2,7 @@
 
 AirTranslate transcribes and translates audio playing on the user's Mac.
 
-AirTranslate is an independent open-source project and is not affiliated with Apple, OpenAI, Google, or Meta.
+AirTranslate is an independent open-source project and is not affiliated with Apple, OpenAI, Google, Meta, or Microsoft.
 
 ## Data Handling
 
@@ -10,7 +10,7 @@ AirTranslate is an independent open-source project and is not affiliated with Ap
 - AirTranslate has no developer-operated relay or backend server. This does not mean optional provider modes are offline: when enabled, they send the audio or text needed for the selected feature directly to the corresponding external API.
 - AirTranslate does not include analytics, ads, tracking SDKs, or telemetry SDKs.
 - Captured audio is used for live transcription and translation while the user has capture running.
-- Saved transcripts are stored locally as plain-text files under the user's `~/Library/Application Support/AirTranslate/Transcripts` directory.
+- Transcript file saving is off by default. When the user enables **Save Transcript Files**, saved transcripts are stored locally as plain-text files under the user's `~/Library/Application Support/AirTranslate/Transcripts` directory.
 - Settings are stored locally with macOS app preferences.
 
 ## Apple System Services
@@ -42,6 +42,14 @@ Meta Scribe is optional and works only after the user provides a Meta API key.
 When Meta Scribe is enabled, AirTranslate sends the audio needed for Muse Voice Transcribe realtime transcription, speaker labels, and 25-language code-switching directly to Meta's API, then applies AirTranslate's existing translation layer locally or through the separately selected translation path.
 
 Meta API keys are user-provided runtime data. AirTranslate stores them in macOS Keychain and does not include API keys in the source tree, release scripts, or generated release bundles.
+
+## Optional Azure MAI Transcription
+
+Azure MAI is optional and works only after the user provides an Azure Speech endpoint and API key.
+
+When Azure MAI is enabled, AirTranslate sends audio in the selected source language to Azure Speech MAI-Transcribe-2 in 5-second segments, then uses Apple Translation for captions. Azure charges apply separately, and service availability depends on the user's Azure resource.
+
+Azure Speech API keys are user-provided runtime data. AirTranslate stores them in macOS Keychain and does not include API keys in the source tree, release scripts, or generated release bundles. The Azure Speech endpoint is stored locally with macOS app preferences.
 
 ## Permissions
 

@@ -100,7 +100,8 @@ fi
 require_pattern 'tccutil reset Microphone "$BUNDLE_ID"' "$LOCAL_BUILD_SCRIPT"
 require_pattern 'defaults delete "$BUNDLE_ID" "AirTranslate.screenRecordingAccessRequestAttempted"' "$LOCAL_BUILD_SCRIPT"
 require_pattern 'Microphone (when selected)' "$LOCAL_BUILD_SCRIPT"
-require_pattern '/usr/bin/nohup "$APP_BINARY"' "$LOCAL_BUILD_SCRIPT"
+require_pattern '/usr/bin/open -n --stdout' "$LOCAL_BUILD_SCRIPT"
+require_pattern '"$APP_BUNDLE"' "$LOCAL_BUILD_SCRIPT"
 require_pattern 'verify_running_app' "$LOCAL_BUILD_SCRIPT"
 require_pattern 'Expected $APP_BINARY' "$LOCAL_BUILD_SCRIPT"
 

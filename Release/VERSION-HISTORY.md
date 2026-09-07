@@ -1,5 +1,23 @@
 # AirTranslate Version History
 
+## 1.8.0 - 2026-09-08
+
+### Added
+
+- Azure MAI preview mode sends 5-second audio chunks to Azure Speech MAI-Transcribe-2 with a user-provided Azure Speech endpoint and API key, then translates captions through Apple Translation.
+- Apple caption pipeline coverage now includes segment metadata, repeated final utterances, stale recognition rejection, bounded partial translation requests, and Stage rewrite presentation.
+
+### Changed
+
+- Transcript file saving is opt-in. Stop and app quit do not write `.txt` files unless **Save Transcript Files** is enabled in Settings > Transcript.
+- Apple Mode now preserves audio segment identity and final-result revisions through recognition, translation, display, and saved transcript staging.
+- Stage caption rewrites wait briefly before replacing readable text, while first text and appended text still appear immediately. Floating-caption stale translation expiry is calculated from the request deadline.
+
+### Fixed
+
+- Short final utterances and repeated sentences are preserved instead of being collapsed into nearby partial or final results.
+- Transcript pane copy buttons remain discoverable through keyboard and accessibility focus.
+
 ## 1.7.1 - 2026-09-02
 
 ### Added

@@ -84,7 +84,7 @@ struct TranscriptPersistenceTests {
         )
         session.useTranscribeOnlyMode()
         session.sourceLanguage = .english
-        session.targetLanguage = .japanese
+        session.targetLanguage = .korean
         session.isRunning = true
         return (session, directory, defaults, suiteName)
     }

@@ -31,7 +31,7 @@ AirTranslate captures audio playing on your Mac, turns it into a live transcript
 
 For a user-facing overview, setup guide, and download path, visit the [AirTranslate Guide Site](https://himomohi.github.io/AirTranslate/).
 
-The default workflow uses Apple frameworks. GPT Realtime, Gemini Live Translate, and Meta Scribe are optional API-backed modes and can be enabled from the app only after you provide the matching API key.
+The default workflow uses Apple frameworks. GPT Realtime, Gemini Live Translate, Meta Scribe, and Azure MAI are optional API-backed modes and can be enabled from the app only after you provide the matching API key and endpoint when required.
 
 ## Why AirTranslate
 
@@ -39,13 +39,23 @@ The default workflow uses Apple frameworks. GPT Realtime, Gemini Live Translate,
 - **Readable live workspace:** source and translated text stay side by side.
 - **Floating captions:** keep subtitles above other apps while you watch or listen.
 - **Apple by default:** Apple Speech and Apple Translation remain the baseline path.
-- **Optional API modes:** OpenAI Realtime Translation, Gemini Live Translate, and Meta Scribe can be enabled only when needed.
-- **Keychain storage:** OpenAI, Gemini, and Meta API keys are entered by the user and stored in macOS Keychain.
+- **Optional API modes:** OpenAI Realtime Translation, Gemini Live Translate, Meta Scribe, and Azure MAI can be enabled only when needed.
+- **Keychain storage:** OpenAI, Gemini, Meta, and Azure Speech API keys are entered by the user and stored in macOS Keychain.
 - **Optional plain text history:** transcript files are off by default and can be enabled from Settings; saved transcripts remain normal `.txt` files in Application Support.
 
 ![AirTranslate demo](docs/assets/airtranslate-readme-demo.gif)
 
 > "Turn any Mac audio into live captions and translation, right where you are watching."
+
+## What's New in 1.8.0
+
+- **Transcript files are opt-in:** **Save Transcript Files** is off by default. Session text stays in memory unless you enable file saving in Settings > Transcript, so Stop and app quit no longer create `.txt` files by default.
+- **Azure MAI preview:** Azure MAI is a new optional transcription mode. After you provide an Azure Speech endpoint and API key, AirTranslate sends 5-second audio segments to Azure Speech MAI-Transcribe-2 and uses Apple Translation for captions. Azure charges apply separately, and real Azure audio validation depends on your resource.
+- **Apple captions preserve short and repeated speech:** Apple Mode now tracks audio segment range, revision, and final-result metadata so short utterances like "Yes. No." and later repeated sentences stay visible and saved as separate speech.
+- **More readable Stage and floating caption rewrites:** First text and appended text appear immediately, while full rewrites are held briefly and replaced in one piece so live captions are easier to read without claiming a blanket speedup. Floating-caption stale translation expiry is calculated from the request deadline instead of a delayed task start.
+- **Keyboard-reachable copy:** Transcript pane copy controls appear for pointer, keyboard, and accessibility focus.
+
+See the complete [AirTranslate 1.8.0 release notes](https://github.com/himomohi/AirTranslate/releases/tag/v1.8.0).
 
 ## What's New in 1.7.1
 
@@ -104,7 +114,7 @@ See the complete [AirTranslate 1.5.1 release notes](https://github.com/himomohi/
 ## What's New in 1.5.0
 
 - **Apple Mode lifecycle hardening:** Apple Mode remains the default local-first path and now ignores late permission, warm-up, and capture callbacks from an older start attempt.
-- **Clean external stops:** stopping macOS system-audio capture outside the app now saves the transcript, unlocks the session, and permits a clean restart.
+- **Clean external stops:** stopping macOS system-audio capture outside the app now unlocks the session, permits a clean restart, and saves the transcript only when transcript file saving is enabled.
 - **No silent speech-input loss:** audio backpressure becomes a visible controlled stop instead of silently dropping input.
 - **Optional GPT Transcription:** choose `gpt-live-transcribe` for source-only captions only when you provide an OpenAI API key; it is separate from GPT live translation.
 
@@ -160,10 +170,11 @@ AirTranslate separates the quick choice from the detailed setup.
 | GPT Transcription | OpenAI source-only captions | Uses `gpt-live-transcribe` for source-language captions without translation after you choose this optional mode and provide an OpenAI API key. |
 | Gemini Live | Gemini 3.5 Live Translate or source-only transcription | Choose Gemini 3.5 Live Translate for returned input and translated transcripts, or Gemini 3.5 Transcribe Live for original-only captions with automatic spoken-language detection. Both require your Gemini API key. |
 | Meta Scribe | Speaker-labeled multilingual captions | Uses Muse Voice Transcribe for realtime transcription with speaker labels and 25-language code-switching, then AirTranslate's existing translation layer. Requires your Meta API key. |
+| Azure MAI | Preview cloud transcription with Apple captions | Sends audio in 5-second segments to Azure MAI-Transcribe-2 after you configure an Azure Speech endpoint and key, then uses Apple Translation for captions. Azure charges apply separately. |
 | Transcribe Only | Source captions without translation | Records source-language captions without running translation. |
 | LIVE Translation | Direct translated stream | Uses the selected API provider's live translation model path when you want the model to produce the translated stream directly. |
 
-GPT, Gemini, and Meta model details, API key entry, transcript polish, and voice output are managed from the gear-shaped Settings window. Everyday capture controls live in the floating console bar under the Stage.
+GPT, Gemini, Meta, and Azure provider details, API key entry, transcript polish, and voice output are managed from the gear-shaped Settings window. Everyday capture controls live in the floating console bar under the Stage.
 
 ## Privacy And API Keys
 
@@ -173,11 +184,12 @@ AirTranslate does not ship with an account system or a developer-operated relay/
 - OpenAI sends happen only when GPT Mode or the optional GPT Transcription mode is enabled; the required audio or text goes directly to OpenAI's API using your OpenAI API key.
 - Gemini sends happen only when Gemini Live Translate or Gemini 3.5 Transcribe Live is enabled; the required audio goes directly to the Google Gemini API using your Gemini API key.
 - Meta Scribe sends happen only when Meta Scribe is enabled; the required audio goes directly to Meta's Muse Voice Transcribe API using your Meta API key.
-- OpenAI, Gemini, and Meta API keys are user-provided, saved in Keychain, and never hardcoded, committed, or included in release packages.
+- Azure MAI sends happen only when Azure MAI is enabled; audio goes to Azure Speech MAI-Transcribe-2 in 5-second segments using your Azure Speech API key and endpoint, then captions are translated with Apple Translation.
+- OpenAI, Gemini, Meta, and Azure Speech API keys are user-provided, saved in Keychain, and never hardcoded, committed, or included in release packages.
 - Keys are saved in macOS Keychain with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
 - Saved transcripts are plain text files on your Mac.
 
-Need an API key? Open the [OpenAI API key page](https://platform.openai.com/api-keys), [Google AI Studio API key page](https://aistudio.google.com/app/apikey), or [Meta developer portal](https://dev.meta.ai), create a key, then paste it into AirTranslate's Settings window.
+Need an API key? Open the [OpenAI API key page](https://platform.openai.com/api-keys), [Google AI Studio API key page](https://aistudio.google.com/app/apikey), [Meta developer portal](https://dev.meta.ai), or [Azure portal](https://portal.azure.com/), create a key, then paste it into AirTranslate's Settings window.
 
 ## Apple Translation Language Packs
 
@@ -215,7 +227,7 @@ Download the latest open-source build from [GitHub Releases](https://github.com/
 AirTranslate remains fully open-source under the Apache-2.0 License. The DMG is provided only as a convenient macOS installer, while all source code, build scripts, release materials, LICENSE, and NOTICE files remain available in this repository.
 
 - [Download AirTranslate.dmg](https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg)
-- [Download AirTranslate-1.7.1.zip](https://github.com/himomohi/AirTranslate/releases/download/v1.7.1/AirTranslate-1.7.1.zip)
+- [Download AirTranslate-1.8.0.zip](https://github.com/himomohi/AirTranslate/releases/download/v1.8.0/AirTranslate-1.8.0.zip)
 - [Download AirTranslate.dmg.sha256](https://github.com/himomohi/AirTranslate/releases/latest/download/AirTranslate.dmg.sha256)
 - [View version history](Release/VERSION-HISTORY.md)
 
@@ -245,6 +257,7 @@ Developer ID signing and notarization are planned for a later distribution step.
 - Optional: an OpenAI API key for GPT mode
 - Optional: a Gemini API key for Gemini Live mode
 - Optional: a Meta API key for Meta Scribe mode
+- Optional: an Azure Speech API key and endpoint for Azure MAI mode
 
 ## Build From Source
 
@@ -283,8 +296,8 @@ swift test
 
 1. Choose the source and target languages.
 2. Use the center swap button if you want to reverse the direction.
-3. Choose Apple Mode, GPT Mode, Gemini Live, or Meta Scribe from the console bar.
-4. For API-backed modes, add the matching OpenAI, Gemini, or Meta API key in Settings if prompted.
+3. Choose Apple Mode, GPT Mode, Gemini Live, Meta Scribe, or Azure MAI from the console bar.
+4. For API-backed modes, add the matching OpenAI, Gemini, Meta, or Azure Speech API key and endpoint in Settings if prompted.
 5. Press Start.
 6. Play meeting, lecture, video, interview, or stream audio on your Mac.
 7. Read the transcript and translation in the main workspace or floating caption window.
@@ -330,7 +343,8 @@ docs/assets/
 - `AppleTranslationService`: isolates Apple Translation work.
 - `OpenAIRealtimeTranscriber`: handles optional OpenAI realtime translation and transcript events.
 - `GeminiLiveTranslationService`: handles optional Gemini Live Translate websocket sessions.
-- `OpenAIAPIKeyStore` / `GeminiAPIKeyStore`: save API keys in macOS Keychain.
+- `AzureMAITranscriber`: handles optional Azure MAI-Transcribe-2 REST transcription segments.
+- `OpenAIAPIKeyStore` / `GeminiAPIKeyStore` / `MetaAPIKeyStore` / `AzureSpeechAPIKeyStore`: save API keys in macOS Keychain.
 - `TranslationSessionStore`: coordinates capture, transcript state, translation, saving, and playback.
 - `SidebarView`: language, mode, session, and settings entry points.
 - `CaptionBoardView`: live transcript, translation, controls, and audio meter.
@@ -341,4 +355,8 @@ docs/assets/
 
 AirTranslate is released under the [Apache License 2.0](LICENSE). Copyright attribution is provided in [NOTICE](NOTICE).
 
-AirTranslate is an independent open-source project and is not affiliated with Apple, OpenAI, or Google.
+AirTranslate is an independent open-source project and is not affiliated with Apple, OpenAI, Google, Meta, or Microsoft.
+
+## Optional Azure MAI transcription
+
+Choose **Settings → General → Azure MAI**, then configure an Azure Speech resource endpoint and key under **API Keys**. This preview option sends audio in the selected source language to MAI-Transcribe-2 in 5-second segments and uses Apple Translation for captions. Existing engine defaults are preserved. Azure charges apply separately. Stop waits for the final segments; word boundaries can be cut between segments. A supported Azure resource and real-audio verification are required. Keys stay in Keychain.

@@ -52,7 +52,7 @@ enum CaptureStartRecoveryAction: Equatable {
 
     static func forReadiness(_ readiness: StartReadinessAssessment) -> Self? {
         switch readiness.issue {
-        case .openAIAPIKeyMissing, .geminiAPIKeyMissing, .metaAPIKeyMissing:
+        case .openAIAPIKeyMissing, .geminiAPIKeyMissing, .metaAPIKeyMissing, .azureConfigurationMissing:
             .apiKeys
         case .localAssetsChecking, .localAssetsUnavailable:
             .retry
@@ -99,6 +99,8 @@ private struct TranslationRequest {
     let source: LanguageOption
     let target: LanguageOption
     let preservesOrdering: Bool
+    let bypassesDebounce: Bool
+    let appleIdentity: AppleTranslationRequestIdentity?
 }
 
 private struct PendingCaptionPresentation {
@@ -107,12 +109,14 @@ private struct PendingCaptionPresentation {
     let isFinal: Bool
     let source: LanguageOption
     let target: LanguageOption
+    let metadata: AppleSpeechRecognitionMetadata?
 }
 
 private struct PendingRecognizedCaption {
     let sourceText: String
     let recognizedLanguage: LanguageOption
     let confidence: Double
+    let metadata: AppleSpeechRecognitionMetadata?
 }
 
 struct StartConfiguration: Equatable {
@@ -125,6 +129,8 @@ struct StartConfiguration: Equatable {
     let openAITranslationModel: OpenAIRealtimeTranslationModel
     let geminiTranslationModel: GeminiTranslationModel
     let metaTranscriptionModel: MetaTranscriptionModel
+    let azureMAIEnabled: Bool
+    let azureSpeechEndpoint: String
     let usesMetaSpeakerLabels: Bool
     let usesAppleSourceAutoDetection: Bool
 
@@ -138,6 +144,8 @@ struct StartConfiguration: Equatable {
         openAITranslationModel: OpenAIRealtimeTranslationModel,
         geminiTranslationModel: GeminiTranslationModel,
         metaTranscriptionModel: MetaTranscriptionModel = .off,
+        azureMAIEnabled: Bool = false,
+        azureSpeechEndpoint: String = "",
         usesMetaSpeakerLabels: Bool = true,
         usesAppleSourceAutoDetection: Bool
     ) {
@@ -150,6 +158,8 @@ struct StartConfiguration: Equatable {
         self.openAITranslationModel = openAITranslationModel
         self.geminiTranslationModel = geminiTranslationModel
         self.metaTranscriptionModel = metaTranscriptionModel
+        self.azureMAIEnabled = azureMAIEnabled
+        self.azureSpeechEndpoint = azureSpeechEndpoint
         self.usesMetaSpeakerLabels = usesMetaSpeakerLabels
         self.usesAppleSourceAutoDetection = usesAppleSourceAutoDetection
     }
@@ -291,6 +301,7 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         let transcriber: LiveSpeechTranscriber
         let openAITranscriber: OpenAIRealtimeTranscriber
         let geminiLiveTranslator: GeminiLiveTranslationService
+        let azureMAITranscriber: AzureMAITranscriber
         let metaVoiceTranscriber: MetaVoiceTranscribeService
     }
 
@@ -302,7 +313,8 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         transcriber: LiveSpeechTranscriber,
         openAITranscriber: OpenAIRealtimeTranscriber,
         geminiLiveTranslator: GeminiLiveTranslationService,
-        metaVoiceTranscriber: MetaVoiceTranscribeService
+        metaVoiceTranscriber: MetaVoiceTranscribeService,
+        azureMAITranscriber: AzureMAITranscriber
     ) {
         lock.lock()
         pipeline = Pipeline(
@@ -310,6 +322,7 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
             transcriber: transcriber,
             openAITranscriber: openAITranscriber,
             geminiLiveTranslator: geminiLiveTranslator,
+            azureMAITranscriber: azureMAITranscriber,
             metaVoiceTranscriber: metaVoiceTranscriber
         )
         lock.unlock()
@@ -332,6 +345,7 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         pipeline.openAITranscriber.append(sampleBuffer)
         pipeline.geminiLiveTranslator.append(sampleBuffer)
         pipeline.metaVoiceTranscriber.append(sampleBuffer)
+        pipeline.azureMAITranscriber.append(sampleBuffer)
     }
 }
 
@@ -481,11 +495,34 @@ final class TranslationSessionStore {
     }
     var hasOpenAIAPIKey = OpenAIAPIKeyStore.hasAPIKey()
     var hasGeminiAPIKey = GeminiAPIKeyStore.hasAPIKey()
+    var hasAzureSpeechAPIKey = AzureSpeechAPIKeyStore.hasAPIKey()
+    var azureSpeechEndpoint = "" {
+        didSet { persistSelectedSettings() }
+    }
+    var isUsingAzureMAI = false {
+        didSet {
+            if isUsingAzureMAI {
+                selectedModel = .appleSystem
+                openAITranscriptionModel = .off
+                openAITranslationModel = .off
+                geminiTranslationModel = .off
+                metaTranscriptionModel = .off
+                isTranscriptLintEnabled = false
+            }
+            persistSelectedSettings()
+            refreshModelAvailability()
+        }
+    }
+    var isFinishingAzureMAI = false
+    @ObservationIgnored private var azureMAITranscriber = AzureMAITranscriber()
+    @ObservationIgnored private var azureFinishTask: Task<Void, Never>?
+    private var azureSavedTranscriptText = ""
     var hasMetaAPIKey = MetaAPIKeyStore.hasAPIKey()
     var requestedSettingsCategoryID: String?
     var openAITranscriptionModel = OpenAIRealtimeTranscriptionModel.off {
         didSet {
             if openAITranscriptionModel.isEnabled {
+                isUsingAzureMAI = false
                 isTranscriptLintEnabled = false
                 geminiTranslationModel = .off
                 metaTranscriptionModel = .off
@@ -498,6 +535,7 @@ final class TranslationSessionStore {
     var openAITranslationModel = OpenAIRealtimeTranslationModel.off {
         didSet {
             if openAITranslationModel.isEnabled {
+                isUsingAzureMAI = false
                 guard openAITranslationModel.isSupportedLiveTranslationModel else {
                     openAITranslationModel = .gptRealtimeTranslate
                     return
@@ -515,6 +553,7 @@ final class TranslationSessionStore {
     var geminiTranslationModel = GeminiTranslationModel.off {
         didSet {
             if geminiTranslationModel.isEnabled {
+                isUsingAzureMAI = false
                 isTranscriptLintEnabled = false
                 selectedModel = .appleSystem
                 openAITranscriptionModel = .off
@@ -537,6 +576,7 @@ final class TranslationSessionStore {
     var metaTranscriptionModel = MetaTranscriptionModel.off {
         didSet {
             if metaTranscriptionModel.isEnabled {
+                isUsingAzureMAI = false
                 isTranscriptLintEnabled = false
                 selectedModel = .appleSystem
                 openAITranscriptionModel = .off
@@ -677,6 +717,29 @@ final class TranslationSessionStore {
     private var recognizedCaptionDeliveryTask: Task<Void, Never>?
     private var lastRecognizedCaptionDeliveryAt = Date.distantPast
     private var isLargeTranscriptRecognitionCoalescingActive = false
+#if DEBUG
+    var usesManualCaptionDeliveryForTesting = false
+
+    func receiveCaptionForTesting(_ text: String, metadata: AppleSpeechRecognitionMetadata? = nil) {
+        enqueueRecognizedCaption(sourceText: text, recognizedLanguage: .english, confidence: 0.9, metadata: metadata)
+    }
+
+    func flushCaptionDeliveryForTesting() {
+        flushPendingRecognizedCaption()
+        flushPendingCaptionPresentation()
+    }
+
+    func completeAppleTranslationForTesting(_ text: String, requestedLine: CaptionLine, metadata: AppleSpeechRecognitionMetadata) {
+        updateTranslation(text, for: requestedLine, matching: requestedLine.sourceText, appleIdentity: AppleTranslationRequestIdentity(
+            lineID: requestedLine.id, sourceText: requestedLine.sourceText,
+            segmentID: metadata.segmentID, revision: metadata.revision, isFinal: metadata.isFinal
+        ))
+    }
+
+    func unspokenAppleTextForTesting(_ text: String, lineID: UUID) -> String? {
+        unspokenTranslatedText(text, isFinal: true, appleLineID: lineID)
+    }
+#endif
     private var transcriptCleanupTask: Task<Void, Never>?
     private var translationTask: Task<Void, Never>?
     private var translationTaskGeneration = 0
@@ -711,6 +774,11 @@ final class TranslationSessionStore {
     private var translationSegmentCache = TranslationSegmentCache(
         capacity: TranslationSessionStore.maxTranslationCacheEntries
     )
+    private let appleRecognitionTranslationPolicy = AppleRecognitionTranslationPolicy()
+    private var appleRecognitionTranslationState = AppleRecognitionTranslationPolicy.State()
+    private var appleSpeechSegmentIDByLineID: [UUID: String] = [:]
+    private var appleSpeechRevisionByLineID: [UUID: Int] = [:]
+    private var appleSmallPartialFlushTask: Task<Void, Never>?
     private var realtimeTranslationSourceText = ""
     private var realtimeTranslationOnlyText = ""
     private var geminiLiveInputTranscriptText = ""
@@ -739,6 +807,8 @@ final class TranslationSessionStore {
     private var pipelineLifecycle = PipelineLifecycleState()
     private var activeCaptionerGeneration: UInt64?
     private var dubbingSpeechProgress = DubbingSpeechProgress()
+    private var appleDubbingProgressByLineID: [UUID: DubbingSpeechProgress] = [:]
+    private var appleDubbingLineOrder: [UUID] = []
     private var hasShownTranscribeOnlyNoticeForCurrentActivation = false
     private var floatingCaptionDisplayModeBeforeTranscribeOnly: FloatingCaptionDisplayMode?
     private var appleVoiceOutputEnabled = false
@@ -791,6 +861,7 @@ final class TranslationSessionStore {
             && !isUsingOpenAIRealtime
             && !isUsingGeminiTranscriptionMode
             && !isUsingMetaScribe
+            && !isUsingAzureMAI
     }
 
     var isUsingProviderTranscriptionMode: Bool {
@@ -956,7 +1027,8 @@ final class TranslationSessionStore {
                     transcriber: transcriber,
                     openAITranscriber: openAITranscriber,
                     geminiLiveTranslator: geminiLiveTranslator,
-                    metaVoiceTranscriber: metaVoiceTranscriber
+                    metaVoiceTranscriber: metaVoiceTranscriber,
+                    azureMAITranscriber: azureMAITranscriber
                 )
 
                 statusMessage = AppText.startingCapture(for: configuration.audioInputSource)
@@ -1015,11 +1087,30 @@ final class TranslationSessionStore {
 
     func stop() {
         guard isRunning || isStarting else { return }
+        if isUsingAzureMAI, isRunning {
+            guard !isFinishingAzureMAI else { return }
+            isFinishingAzureMAI = true
+            statusMessage = AzureMAICopy.finishing
+            audioSamplePipelineRegistry.clear()
+            let service = azureMAITranscriber
+            azureFinishTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await stopCapture()
+                await service.finish()
+                guard !Task.isCancelled, service === azureMAITranscriber, isRunning else { return }
+                isFinishingAzureMAI = false
+                pipelineLifecycle.stop()
+                finishPipeline(statusOverride: nil)
+                azureFinishTask = nil
+            }
+            return
+        }
         pipelineLifecycle.stop()
         finishPipeline(statusOverride: nil)
     }
 
     private func finishPipeline(statusOverride: String?) {
+        isFinishingAzureMAI = false
         invalidateCaptureStartAttempt()
         cancelTranslationSessionWarmup()
         autoStartAfterModelAssetDownloadTask?.cancel()
@@ -1133,6 +1224,8 @@ final class TranslationSessionStore {
             openAITranslationModel: openAITranslationModel,
             geminiTranslationModel: geminiTranslationModel,
             metaTranscriptionModel: metaTranscriptionModel,
+            azureMAIEnabled: isUsingAzureMAI,
+            azureSpeechEndpoint: azureSpeechEndpoint,
             usesMetaSpeakerLabels: isMetaSpeakerLabelsEnabled,
             usesAppleSourceAutoDetection: isUsingAppleSourceAutoDetection
         )
@@ -1212,7 +1305,10 @@ final class TranslationSessionStore {
     }
 
     func startReadinessAssessment() -> StartReadinessAssessment {
-        StartReadinessPolicy.assess(
+        if isUsingAzureMAI, !hasAzureSpeechAPIKey || (try? AzureMAITranscriber.endpointURL(azureSpeechEndpoint)) == nil {
+            return StartReadinessAssessment(issue: .azureConfigurationMissing)
+        }
+        return StartReadinessPolicy.assess(
             requiresOpenAIAPIKey: isUsingOpenAIRealtime,
             hasOpenAIAPIKey: hasOpenAIAPIKey,
             requiresGeminiAPIKey: isUsingGemini,
@@ -1230,7 +1326,7 @@ final class TranslationSessionStore {
         if openAITranscriptionModel.isEnabled {
             return isTranscribeOnlyMode ? nil : .appleOnDevice
         }
-        if isUsingMetaScribe {
+        if isUsingMetaScribe || isUsingAzureMAI {
             return .appleOnDevice
         }
         if isUsingGemini {
@@ -1247,6 +1343,8 @@ final class TranslationSessionStore {
             return AppText.openAIAPIKeyRequiredForGPTMode
         case .geminiAPIKeyMissing:
             return AppText.geminiAPIKeyMissing
+        case .azureConfigurationMissing:
+            return AzureMAICopy.configurationRequired
         case .metaAPIKeyMissing:
             return AppText.metaAPIKeyMissing
         case .localAssetsChecking:
@@ -1277,7 +1375,7 @@ final class TranslationSessionStore {
     }
 
     func pause() {
-        guard isRunning, !isPaused else { return }
+        guard isRunning, !isPaused, !isFinishingAzureMAI else { return }
 
         flushPendingRecognizedCaption()
         flushPendingCaptionPresentation()
@@ -1293,7 +1391,7 @@ final class TranslationSessionStore {
     }
 
     func resume() {
-        guard isRunning, isPaused else { return }
+        guard isRunning, isPaused, !isFinishingAzureMAI else { return }
         pendingAutoDetectionLanguageChange = nil
 
         setCaptionersPaused(false)
@@ -1514,6 +1612,7 @@ final class TranslationSessionStore {
     }
 
     func useAppleDefaultMode() {
+        isUsingAzureMAI = false
         clearTranscribeOnlyNotice(resetActivation: true)
         selectedModel = .appleSystem
         openAITranscriptionModel = .off
@@ -1592,6 +1691,24 @@ final class TranslationSessionStore {
         }
     }
 
+    func useAzureMAIMode() {
+        guard !isRunning, !isStarting else { return }
+        clearTranscribeOnlyNotice(resetActivation: true)
+        isUsingAzureMAI = true
+        applyAppleVoiceOutputDefault()
+        restoreFloatingCaptionDisplayModeAfterTranscribeOnly()
+    }
+
+    func saveAzureSpeechAPIKey(_ key: String) throws {
+        try AzureSpeechAPIKeyStore.saveAPIKey(key)
+        hasAzureSpeechAPIKey = true
+    }
+
+    func removeAzureSpeechAPIKey() throws {
+        try AzureSpeechAPIKeyStore.deleteAPIKey()
+        hasAzureSpeechAPIKey = false
+    }
+
     func useMetaScribeMode() {
         guard !isRunning, !isStarting else { return }
         clearTranscribeOnlyNotice(resetActivation: true)
@@ -1631,6 +1748,7 @@ final class TranslationSessionStore {
     }
 
     func useTranscribeOnlyMode() {
+        isUsingAzureMAI = false
         if floatingCaptionDisplayModeBeforeTranscribeOnly == nil {
             floatingCaptionDisplayModeBeforeTranscribeOnly = floatingCaptionDisplayMode
         }
@@ -2187,6 +2305,16 @@ final class TranslationSessionStore {
                 configuration: configuration,
                 generation: generation
             )
+        } else if configuration.azureMAIEnabled {
+            azureMAITranscriber = AzureMAITranscriber()
+            let service = azureMAITranscriber
+            try service.start(
+                endpoint: configuration.azureSpeechEndpoint,
+                key: try AzureSpeechAPIKeyStore.readAPIKey() ?? "",
+                language: configuration.sourceLanguage.id.split(separator: "-").first.map(String.init)
+            ) { [weak self, weak service] result in
+                await self?.receiveAzureMAI(result, service: service, generation: generation)
+            }
         } else if configuration.metaTranscriptionModel.isEnabled {
             try await metaVoiceTranscriber.start(
                 model: configuration.metaTranscriptionModel,
@@ -2219,6 +2347,7 @@ final class TranslationSessionStore {
         !configuration.openAITranscriptionModel.isEnabled
             && !configuration.geminiTranslationModel.isEnabled
             && !configuration.metaTranscriptionModel.isEnabled
+            && !configuration.azureMAIEnabled
             && !configuration.openAITranslationModel.usesRealtimeAudioTranslation
     }
 
@@ -2302,6 +2431,7 @@ final class TranslationSessionStore {
         }
         geminiLiveTranslator.stop()
         metaVoiceTranscriber.stop()
+        azureMAITranscriber.stop()
     }
 
     private func scheduleGeminiSessionRefresh(
@@ -2502,9 +2632,11 @@ final class TranslationSessionStore {
         openAITranscriber.setPaused(isPaused)
         geminiLiveTranslator.setPaused(isPaused)
         metaVoiceTranscriber.setPaused(isPaused)
+        azureMAITranscriber.setPaused(isPaused)
     }
 
     private func resetLiveSessionState(clearsVisibleLines: Bool) {
+        if clearsVisibleLines { azureSavedTranscriptText = "" }
         audioSampleCount = 0
         latestAudioLevel = nil
         lastRecognizedText = ""
@@ -2519,6 +2651,13 @@ final class TranslationSessionStore {
         recognizedCaptionDeliveryTask = nil
         lastRecognizedCaptionDeliveryAt = Date.distantPast
         isLargeTranscriptRecognitionCoalescingActive = false
+        appleRecognitionTranslationState = AppleRecognitionTranslationPolicy.State()
+        appleSpeechSegmentIDByLineID.removeAll()
+        appleSpeechRevisionByLineID.removeAll()
+        appleDubbingProgressByLineID.removeAll()
+        appleDubbingLineOrder.removeAll()
+        appleSmallPartialFlushTask?.cancel()
+        appleSmallPartialFlushTask = nil
         committedSourceText = ""
         currentPartialText = ""
         currentPartialLanguage = nil
@@ -2795,12 +2934,16 @@ final class TranslationSessionStore {
         isAppleSourceAutoDetectionEnabled = isAppleSourceAutoDetectionAvailable
             && defaults.bool(forKey: SettingsKey.isAppleSourceAutoDetectionEnabled)
         refreshMicrophoneInputDevices()
+        azureSpeechEndpoint = defaults.string(forKey: "azureSpeechEndpoint") ?? ""
+        let restoredAzureMode = defaults.bool(forKey: "azureMAIEnabled")
         let restoredGPTTranscriptionMode =
             defaults.string(forKey: SettingsKey.openAITranscriptionModelID)
             == OpenAIRealtimeTranscriptionModel.gptLiveTranscribe.rawValue
         let restoredGeminiTranscriptionMode = geminiTranslationModel.isTranscription
         let restoredMetaTranscriptionMode = metaTranscriptionModel.isEnabled
-        if restoredGPTTranscriptionMode {
+        if restoredAzureMode {
+            isUsingAzureMAI = true
+        } else if restoredGPTTranscriptionMode {
             if floatingCaptionDisplayModeBeforeTranscribeOnly == nil {
                 floatingCaptionDisplayModeBeforeTranscribeOnly = floatingCaptionDisplayMode
             }
@@ -2849,6 +2992,8 @@ final class TranslationSessionStore {
         defaults.set(openAITranslationModel.id, forKey: SettingsKey.openAITranslationModelID)
         defaults.set(geminiTranslationModel.id, forKey: SettingsKey.geminiTranslationModelID)
         defaults.set(preferredGeminiModel.id, forKey: SettingsKey.preferredGeminiModelID)
+        defaults.set(isUsingAzureMAI, forKey: "azureMAIEnabled")
+        defaults.set(azureSpeechEndpoint, forKey: "azureSpeechEndpoint")
         defaults.set(metaTranscriptionModel.id, forKey: SettingsKey.metaTranscriptionModelID)
         defaults.set(isMetaSpeakerLabelsEnabled, forKey: SettingsKey.metaSpeakerLabelsEnabled)
         defaults.set(isDubbingEnabled, forKey: SettingsKey.isDubbingEnabled)
@@ -3012,16 +3157,13 @@ final class TranslationSessionStore {
     private func stageTranscriptForSave(_ sourceText: String, translatedText: String? = nil) {
         guard isTranscriptPersistenceEnabled else { return }
 
-        let sourceText = usesAppleCaptionRollover && lines.count > 1
-            ? appleSavedSourceTranscriptText
-            : sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 전체 이력 조합은 체크포인트에서만 수행해 매 부분 결과의 비용을 제한한다.
+        let sourceText = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sourceText.isEmpty else { return }
 
         activeAutosaveSourceText = sourceText
         if let translatedText {
-            let translatedText = usesAppleCaptionRollover && lines.count > 1
-                ? appleSavedTranslatedTranscriptText
-                : translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let translatedText = translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !translatedText.isEmpty, translatedText != AppText.translating {
                 activeAutosaveTranslatedText = translatedText
             }
@@ -3281,10 +3423,17 @@ final class TranslationSessionStore {
         sourceText: String,
         recognizedLanguage: LanguageOption,
         confidence: Double,
-        isFinal: Bool
+        isFinal: Bool,
+        metadata: AppleSpeechRecognitionMetadata? = nil
     ) {
         guard isRunning, !isPaused else { return }
-        guard sourceText != lastRecognizedText || isFinal != lastRecognizedWasFinal else { return }
+        guard sourceText != lastRecognizedText || isFinal != lastRecognizedWasFinal || metadata != nil else { return }
+        guard appleRecognitionTranslationPolicy.acceptsRecognition(
+            metadata,
+            state: appleRecognitionTranslationState
+        ) else {
+            return
+        }
 
         let now = Date()
         let hadLongSilence = now.timeIntervalSince(lastRecognitionAt) > paragraphBreakSilenceInterval
@@ -3308,13 +3457,22 @@ final class TranslationSessionStore {
             return
         }
         let direction = translationDirection(recognizedLanguage: recognizedLanguage)
-
-        let updatedSourceText = accumulatedTranscript(
-            incoming: sourceText,
-            hadLongSilence: hadLongSilence,
-            isFinal: isFinal,
-            language: direction.source
-        )
+        let updatedSourceText: String
+        if metadata != nil {
+            updatedSourceText = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            prepareAppleSpeechSegmentForAuthoritativeUpdate(
+                sourceText: updatedSourceText,
+                language: direction.source,
+                metadata: metadata
+            )
+        } else {
+            updatedSourceText = accumulatedTranscript(
+                incoming: sourceText,
+                hadLongSilence: hadLongSilence,
+                isFinal: isFinal,
+                language: direction.source
+            )
+        }
         guard !updatedSourceText.isEmpty else { return }
 
         lastRecognizedText = sourceText
@@ -3327,29 +3485,47 @@ final class TranslationSessionStore {
             let existingLine = lines[index]
             let sourceLanguageChanged = sourceLanguageByLineID[existingLine.id] != direction.source
             sourceLanguageByLineID[existingLine.id] = direction.source
-            guard updatedSourceText != existingLine.sourceText || sourceLanguageChanged else { return }
+            updateAppleSpeechIdentity(lineID: existingLine.id, metadata: metadata)
+            guard updatedSourceText != existingLine.sourceText || sourceLanguageChanged || metadata != nil else { return }
             if sourceLanguageChanged, updatedSourceText == existingLine.sourceText {
                 pendingTranslationSourceText = ""
-                requestTranslation(for: existingLine, source: direction.source, target: direction.target)
+                requestTranslationForAppleRecognition(
+                    for: existingLine,
+                    source: direction.source,
+                    target: direction.target,
+                    metadata: metadata
+                )
+                finalizeAppleSpeechSegmentIfNeeded(lineID: existingLine.id, metadata: metadata)
                 return
             }
 
             if shouldPresentCaptionUpdate(sourceText: updatedSourceText, isFinal: isFinal) {
                 clearPendingCaptionPresentation()
-                presentCaptionLineUpdate(
+                let updatedLine = presentCaptionLineUpdate(
                     lineID: existingLine.id,
                     sourceText: updatedSourceText,
                     isFinal: isFinal,
                     source: direction.source,
-                    target: direction.target
+                    target: direction.target,
+                    metadata: metadata
                 )
+                if let updatedLine {
+                    requestTranslationForAppleRecognition(
+                        for: updatedLine,
+                        source: direction.source,
+                        target: direction.target,
+                        metadata: metadata
+                    )
+                    finalizeAppleSpeechSegmentIfNeeded(lineID: updatedLine.id, metadata: metadata)
+                }
             } else {
                 scheduleCaptionPresentation(
                     lineID: existingLine.id,
                     sourceText: updatedSourceText,
                     isFinal: isFinal,
                     source: direction.source,
-                    target: direction.target
+                    target: direction.target,
+                    metadata: metadata
                 )
             }
         } else {
@@ -3364,18 +3540,31 @@ final class TranslationSessionStore {
             )
             currentLineID = line.id
             sourceLanguageByLineID[line.id] = direction.source
+            updateAppleSpeechIdentity(lineID: line.id, metadata: metadata)
             lines.append(line)
             lastCaptionPresentationUpdateAt = Date()
             stageTranscriptForSave(line.sourceText)
-            requestTranslation(for: line, source: direction.source, target: direction.target)
+            requestTranslationForAppleRecognition(
+                for: line,
+                source: direction.source,
+                target: direction.target,
+                metadata: metadata
+            )
+            finalizeAppleSpeechSegmentIfNeeded(lineID: line.id, metadata: metadata)
         }
     }
 
     private func enqueueRecognizedCaption(
         sourceText: String,
         recognizedLanguage: LanguageOption,
-        confidence: Double
+        confidence: Double,
+        metadata: AppleSpeechRecognitionMetadata? = nil
     ) {
+        let isFinal = metadata?.isFinal ?? false
+        if isFinal {
+            flushPendingRecognizedCaption()
+        }
+
         if !isLargeTranscriptRecognitionCoalescingActive {
             let currentSourceLength = lines.last?.sourceText.utf16.count ?? 0
             isLargeTranscriptRecognitionCoalescingActive = usesLongSessionMode
@@ -3383,13 +3572,14 @@ final class TranslationSessionStore {
                 || sourceText.utf16.count >= Self.largeTranscriptPresentationCharacterLimit
         }
 
-        guard isLargeTranscriptRecognitionCoalescingActive else {
+        guard isLargeTranscriptRecognitionCoalescingActive, !isFinal else {
             lastRecognizedCaptionDeliveryAt = Date()
             appendCaption(
                 sourceText: sourceText,
                 recognizedLanguage: recognizedLanguage,
                 confidence: confidence,
-                isFinal: false
+                isFinal: isFinal,
+                metadata: metadata
             )
             return
         }
@@ -3397,7 +3587,8 @@ final class TranslationSessionStore {
         pendingRecognizedCaption = PendingRecognizedCaption(
             sourceText: sourceText,
             recognizedLanguage: recognizedLanguage,
-            confidence: confidence
+            confidence: confidence,
+            metadata: metadata
         )
         guard recognizedCaptionDeliveryTask == nil else { return }
 
@@ -3408,6 +3599,9 @@ final class TranslationSessionStore {
             return
         }
 
+#if DEBUG
+        if usesManualCaptionDeliveryForTesting { return }
+#endif
         recognizedCaptionDeliveryTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(Int(delay * 1_000)))
             guard !Task.isCancelled else { return }
@@ -3426,7 +3620,8 @@ final class TranslationSessionStore {
             sourceText: pendingRecognizedCaption.sourceText,
             recognizedLanguage: pendingRecognizedCaption.recognizedLanguage,
             confidence: pendingRecognizedCaption.confidence,
-            isFinal: false
+            isFinal: pendingRecognizedCaption.metadata?.isFinal ?? false,
+            metadata: pendingRecognizedCaption.metadata
         )
     }
 
@@ -3440,7 +3635,7 @@ final class TranslationSessionStore {
             return lineLanguage
         }
 
-        return nil
+        return lines.last.flatMap { sourceLanguageByLineID[$0.id] }
     }
 
     private func shouldRequestAutoDetectionLanguageChange(
@@ -3525,19 +3720,24 @@ final class TranslationSessionStore {
         sourceText: String,
         isFinal: Bool,
         source: LanguageOption,
-        target: LanguageOption
+        target: LanguageOption,
+        metadata: AppleSpeechRecognitionMetadata?
     ) {
         pendingCaptionPresentation = PendingCaptionPresentation(
             lineID: lineID,
             sourceText: sourceText,
             isFinal: isFinal,
             source: source,
-            target: target
+            target: target,
+            metadata: metadata
         )
         captionPresentationTask?.cancel()
 
         let elapsed = Date().timeIntervalSince(lastCaptionPresentationUpdateAt)
         let delay = max(0, Self.largeTranscriptPresentationInterval - elapsed)
+#if DEBUG
+        if usesManualCaptionDeliveryForTesting { return }
+#endif
         captionPresentationTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(Int(delay * 1_000)))
             guard !Task.isCancelled else { return }
@@ -3551,13 +3751,26 @@ final class TranslationSessionStore {
         self.pendingCaptionPresentation = nil
         captionPresentationTask?.cancel()
         captionPresentationTask = nil
-        presentCaptionLineUpdate(
+        let line = presentCaptionLineUpdate(
             lineID: pendingCaptionPresentation.lineID,
             sourceText: pendingCaptionPresentation.sourceText,
             isFinal: pendingCaptionPresentation.isFinal,
             source: pendingCaptionPresentation.source,
-            target: pendingCaptionPresentation.target
+            target: pendingCaptionPresentation.target,
+            metadata: pendingCaptionPresentation.metadata
         )
+        if let line {
+            requestTranslationForAppleRecognition(
+                for: line,
+                source: pendingCaptionPresentation.source,
+                target: pendingCaptionPresentation.target,
+                metadata: pendingCaptionPresentation.metadata
+            )
+            finalizeAppleSpeechSegmentIfNeeded(
+                lineID: line.id,
+                metadata: pendingCaptionPresentation.metadata
+            )
+        }
     }
 
     private func clearPendingCaptionPresentation() {
@@ -3566,17 +3779,25 @@ final class TranslationSessionStore {
         captionPresentationTask = nil
     }
 
+    @discardableResult
     private func presentCaptionLineUpdate(
         lineID: UUID,
         sourceText: String,
         isFinal: Bool,
         source: LanguageOption,
-        target: LanguageOption
-    ) {
-        guard let index = lines.firstIndex(where: { $0.id == lineID }) else { return }
+        target: LanguageOption,
+        metadata: AppleSpeechRecognitionMetadata? = nil
+    ) -> CaptionLine? {
+        if PipelineDiagnostics.isEnabled {
+            PipelineDiagnostics.record("caption.present", id: lineID.uuidString, values: ["characters": Double(sourceText.count)])
+        }
+        guard let index = lines.firstIndex(where: { $0.id == lineID }) else { return nil }
 
         let existingLine = lines[index]
-        guard sourceText != existingLine.sourceText || isFinal != existingLine.isFinal else { return }
+        guard sourceText != existingLine.sourceText || isFinal != existingLine.isFinal || metadata != nil else {
+            updateAppleSpeechIdentity(lineID: existingLine.id, metadata: metadata)
+            return existingLine
+        }
 
         let line = CaptionLine(
             id: existingLine.id,
@@ -3589,9 +3810,10 @@ final class TranslationSessionStore {
             usesLongSessionDisplay: usesLongSessionMode
         )
         lines[index] = line
+        updateAppleSpeechIdentity(lineID: line.id, metadata: metadata)
         lastCaptionPresentationUpdateAt = Date()
         stageTranscriptForSave(line.sourceText)
-        requestTranslation(for: line, source: source, target: target)
+        return line
     }
 
     private func accumulatedTranscript(
@@ -3999,6 +4221,9 @@ final class TranslationSessionStore {
     }
 
     func presentFloatingSourceText(_ text: String, resetsDwell: Bool = true) {
+        if PipelineDiagnostics.isEnabled {
+            PipelineDiagnostics.record("floating.source", values: ["characters": Double(text.count)])
+        }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
@@ -4063,8 +4288,10 @@ final class TranslationSessionStore {
         guard floatingTranslationHoldTask == nil else { return }
 
         let timeout = floatingStabilityProfile.translationHoldTimeout
+        // MainActor 작업 시작 지연이 자막 유지 시간을 늘리지 않도록 요청 시점에 고정한다.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
         floatingTranslationHoldTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(timeout))
+            try? await Task.sleep(until: deadline, clock: .continuous)
             guard !Task.isCancelled else { return }
             floatingTranslationHoldTask = nil
             guard isFloatingTranslationDisplayStale else { return }
@@ -4864,6 +5091,31 @@ final class TranslationSessionStore {
         )
     }
 
+    private func receiveAzureMAI(_ result: Result<String, AzureMAIError>, service: AzureMAITranscriber?, generation: UInt64) {
+        guard let service, service === azureMAITranscriber,
+              pipelineLifecycle.acceptsSample(generation: generation), isRunning, isUsingAzureMAI else { return }
+        switch result {
+        case .failure(let error):
+            azureFinishTask?.cancel()
+            isFinishingAzureMAI = false
+            pipelineLifecycle.stop()
+            finishPipeline(statusOverride: error.localizedDescription)
+        case .success(let text):
+            let line = CaptionLine(sourceText: text, translatedText: AppText.translating,
+                                   createdAt: Date(), isFinal: true, revision: 1,
+                                   usesLongSessionDisplay: usesLongSessionMode)
+            lines.append(line)
+            sourceLanguageByLineID[line.id] = sourceLanguage
+            lastRecognizedText = text
+            lastRecognizedWasFinal = true
+            lastRecognitionAt = Date()
+            presentFloatingSourceText(text)
+            azureSavedTranscriptText = azureSavedTranscriptText.isEmpty ? text : azureSavedTranscriptText + "\n" + text
+            stageTranscriptForSave(azureSavedTranscriptText)
+            requestTranslation(for: line, source: sourceLanguage, target: targetLanguage)
+        }
+    }
+
     private func completeMetaTurn(_ turnId: Int32, transcript: String) {
         guard isRunning, !isPaused, isUsingMetaScribe else { return }
         let sourceText = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4976,11 +5228,157 @@ final class TranslationSessionStore {
         }
     }
 
+    private func requestTranslationForAppleRecognition(
+        for line: CaptionLine,
+        source: LanguageOption,
+        target: LanguageOption,
+        metadata: AppleSpeechRecognitionMetadata?
+    ) {
+        guard let metadata else {
+            requestTranslation(for: line, source: source, target: target)
+            return
+        }
+
+        let decision = appleRecognitionTranslationPolicy.receive(
+            sourceText: line.sourceText,
+            lineID: line.id,
+            metadata: metadata,
+            now: Date(),
+            state: &appleRecognitionTranslationState
+        )
+        handleAppleTranslationDecision(
+            decision,
+            line: line,
+            source: source,
+            target: target,
+            metadata: metadata
+        )
+    }
+
+    private func handleAppleTranslationDecision(
+        _ decision: AppleRecognitionTranslationPolicy.Decision,
+        line: CaptionLine,
+        source: LanguageOption,
+        target: LanguageOption,
+        metadata: AppleSpeechRecognitionMetadata
+    ) {
+        switch decision {
+        case .requestNow(let identity):
+            appleSmallPartialFlushTask?.cancel()
+            appleSmallPartialFlushTask = nil
+            requestTranslation(
+                for: line,
+                source: source,
+                target: target,
+                preservesOrdering: identity.isFinal ? true : nil,
+                bypassesDebounce: true,
+                force: identity.isFinal,
+                appleIdentity: identity
+            )
+        case .hold(let until):
+            scheduleAppleRecognitionTranslationRetry(
+                lineID: line.id,
+                source: source,
+                target: target,
+                metadata: metadata,
+                dueAt: until
+            )
+        case .ignoreStale, .unchanged:
+            break
+        }
+    }
+
+    private func scheduleAppleRecognitionTranslationRetry(
+        lineID: UUID,
+        source: LanguageOption,
+        target: LanguageOption,
+        metadata: AppleSpeechRecognitionMetadata,
+        dueAt: Date
+    ) {
+        appleSmallPartialFlushTask?.cancel()
+        let delay = max(0, dueAt.timeIntervalSince(Date()))
+        appleSmallPartialFlushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(delay * 1_000)))
+            guard let self, !Task.isCancelled, self.isRunning, !self.isPaused else { return }
+            guard let index = self.lines.firstIndex(where: { $0.id == lineID }) else { return }
+            guard self.appleSpeechSegmentIDByLineID[lineID] == metadata.segmentID,
+                  !self.lines[index].isFinal || metadata.isFinal
+            else {
+                return
+            }
+            self.requestTranslationForAppleRecognition(
+                for: self.lines[index],
+                source: source,
+                target: target,
+                metadata: metadata
+            )
+        }
+    }
+
+    private func updateAppleSpeechIdentity(
+        lineID: UUID,
+        metadata: AppleSpeechRecognitionMetadata?
+    ) {
+        guard let metadata else { return }
+        appleSpeechSegmentIDByLineID[lineID] = metadata.segmentID
+        appleSpeechRevisionByLineID[lineID] = metadata.revision
+    }
+
+    private func prepareAppleSpeechSegmentForAuthoritativeUpdate(
+        sourceText: String,
+        language: LanguageOption,
+        metadata: AppleSpeechRecognitionMetadata?
+    ) {
+        guard let metadata else {
+            return
+        }
+
+        let trimmedSourceText = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSourceText.isEmpty else { return }
+
+        if let currentLineID,
+           let currentSegmentID = appleSpeechSegmentIDByLineID[currentLineID],
+           currentSegmentID != metadata.segmentID {
+            self.currentLineID = nil
+            committedSourceText = ""
+            currentPartialText = ""
+            currentPartialLanguage = nil
+            pendingParagraphBreakBeforePartial = false
+            floatingCommittedSourceText = ""
+            floatingCurrentPartialText = ""
+            pendingFloatingParagraphBreakBeforePartial = false
+        }
+
+        currentPartialText = trimmedSourceText
+        currentPartialLanguage = language
+        setFloatingCurrentPartialText(trimmedSourceText)
+    }
+
+    private func finalizeAppleSpeechSegmentIfNeeded(
+        lineID: UUID,
+        metadata: AppleSpeechRecognitionMetadata?
+    ) {
+        guard metadata?.isFinal == true, currentLineID == lineID else { return }
+        flushPendingCaptionPresentation()
+        commitCurrentPartial()
+        currentLineID = nil
+        committedSourceText = ""
+        currentPartialText = ""
+        currentPartialLanguage = nil
+        pendingParagraphBreakBeforePartial = false
+        floatingCommittedSourceText = ""
+        floatingCurrentPartialText = ""
+        pendingFloatingParagraphBreakBeforePartial = false
+    }
+
     private func requestTranslation(
         for line: CaptionLine,
         source: LanguageOption,
         target: LanguageOption,
-        preservesOrdering: Bool? = nil
+        preservesOrdering: Bool? = nil,
+        bypassesDebounce: Bool = false,
+        force: Bool = false,
+        appleIdentity: AppleTranslationRequestIdentity? = nil
     ) {
         guard !openAITranslationModel.usesRealtimeAudioTranslation else { return }
         guard !isUsingGeminiTranslation else { return }
@@ -5000,9 +5398,9 @@ final class TranslationSessionStore {
         }
 
         let sourceText = line.sourceText
-        let preservesOrdering = preservesOrdering ?? isUsingMetaScribe
+        let preservesOrdering = preservesOrdering ?? (isUsingMetaScribe || isUsingAzureMAI)
         if !preservesOrdering {
-            guard pendingTranslationSourceText != sourceText else { return }
+            guard force || pendingTranslationSourceText != sourceText else { return }
             pendingTranslationSourceText = sourceText
         }
         if latestTranslationRequest == nil, orderedTranslationRequests.isEmpty {
@@ -5014,9 +5412,14 @@ final class TranslationSessionStore {
             translationSourceText: sourceText,
             source: source,
             target: target,
-            preservesOrdering: preservesOrdering
+            preservesOrdering: preservesOrdering,
+            bypassesDebounce: bypassesDebounce,
+            appleIdentity: appleIdentity
         )
         if preservesOrdering {
+            if appleIdentity?.isFinal == true, latestTranslationRequest?.line.id == line.id {
+                latestTranslationRequest = nil
+            }
             orderedTranslationRequests.append(request)
         } else {
             latestTranslationRequest = request
@@ -5037,7 +5440,7 @@ final class TranslationSessionStore {
         while !Task.isCancelled, let request = nextTranslationRequest() {
 
             do {
-                let delay = translationDebounceDelay(for: request.sourceText)
+                let delay = request.bypassesDebounce ? 0 : translationDebounceDelay(for: request.sourceText)
                 if delay > 0 {
                     try await Task.sleep(for: .milliseconds(delay))
                 }
@@ -5055,6 +5458,9 @@ final class TranslationSessionStore {
                 if !request.preservesOrdering, latestTranslationRequest != nil {
                     continue
                 }
+                if PipelineDiagnostics.isEnabled {
+                    PipelineDiagnostics.record("translation.start", id: request.line.id.uuidString, values: ["characters": Double(request.sourceText.count)])
+                }
                 let translatedText = try await translateTranscript(
                     translationSourceText,
                     source: request.source,
@@ -5064,12 +5470,21 @@ final class TranslationSessionStore {
                             partialText,
                             for: request.line,
                             matching: request.sourceText,
-                            finalizesRequest: false
+                            finalizesRequest: false,
+                            appleIdentity: request.appleIdentity
                         )
                     }
                 )
+                if PipelineDiagnostics.isEnabled {
+                    PipelineDiagnostics.record("translation.result", id: request.line.id.uuidString, values: ["characters": Double(request.sourceText.count)])
+                }
                 try Task.checkCancellation()
-                updateTranslation(translatedText, for: request.line, matching: request.sourceText)
+                updateTranslation(
+                    translatedText,
+                    for: request.line,
+                    matching: request.sourceText,
+                    appleIdentity: request.appleIdentity
+                )
             } catch is CancellationError {
                 // A cancelled loop can resume after a newer loop was registered;
                 // only clear its own registration to avoid spawning a concurrent loop.
@@ -5114,7 +5529,9 @@ final class TranslationSessionStore {
                 translationSourceText: line.sourceText,
                 source: sourceLanguage,
                 target: targetLanguage,
-                preservesOrdering: true
+                preservesOrdering: true,
+                bypassesDebounce: false,
+                appleIdentity: nil
             )
         }
         orderedTranslationRequests.append(contentsOf: requests)
@@ -5183,23 +5600,46 @@ final class TranslationSessionStore {
         _ translatedText: String,
         for line: CaptionLine,
         matching sourceText: String,
-        finalizesRequest: Bool = true
+        finalizesRequest: Bool = true,
+        appleIdentity: AppleTranslationRequestIdentity? = nil
     ) {
         guard let index = lines.firstIndex(where: { $0.id == line.id }) else { return }
         let currentSourceText = lines[index].sourceText
+        if let appleIdentity {
+            guard let currentIdentity = appleTranslationLineIdentity(for: line.id),
+                  appleRecognitionTranslationPolicy.acceptsTranslationResult(
+                      request: appleIdentity,
+                      current: currentIdentity
+                  )
+            else {
+                if PipelineDiagnostics.isEnabled {
+                    PipelineDiagnostics.record("translation.discard", id: line.id.uuidString, values: ["characters": Double(sourceText.count)])
+                }
+                if finalizesRequest, pendingTranslationSourceText == sourceText {
+                    pendingTranslationSourceText = ""
+                }
+                return
+            }
+        }
         guard Self.isCompatibleLiveSource(current: currentSourceText, requested: sourceText) else {
+            if PipelineDiagnostics.isEnabled {
+                PipelineDiagnostics.record("translation.discard", id: line.id.uuidString, values: ["characters": Double(sourceText.count)])
+            }
             if finalizesRequest, pendingTranslationSourceText == sourceText {
                 pendingTranslationSourceText = ""
             }
             return
         }
         let organizedTranslatedText = organizeTranscript(translatedText, language: targetLanguage)
+        if PipelineDiagnostics.isEnabled {
+            PipelineDiagnostics.record("translation.apply", id: line.id.uuidString, values: ["characters": Double(sourceText.count)])
+        }
         let floatingTranslatedText = translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
         if finalizesRequest, pendingTranslationSourceText == sourceText {
             pendingTranslationSourceText = ""
         }
         stageTranscriptForSave(
-            isUsingMetaScribe ? metaSavedTranscriptText : currentSourceText,
+            isUsingAzureMAI ? azureSavedTranscriptText : (isUsingMetaScribe ? metaSavedTranscriptText : currentSourceText),
             translatedText: organizedTranslatedText
         )
 
@@ -5209,14 +5649,26 @@ final class TranslationSessionStore {
             translatedText: organizedTranslatedText,
             translatedSourceText: sourceText,
             createdAt: line.createdAt,
-            isFinal: line.isFinal,
+            isFinal: lines[index].isFinal,
             revision: lines[index].revision + 1,
             speakerLabel: lines[index].speakerLabel,
             usesLongSessionDisplay: usesLongSessionMode
         )
 
         updateFloatingTranslationPresentation(floatingTranslatedText, sourceText: sourceText)
-        speakTranslatedDeltaIfNeeded(organizedTranslatedText, isFinal: finalizesRequest)
+        speakTranslatedDeltaIfNeeded(organizedTranslatedText, isFinal: finalizesRequest, appleLineID: appleIdentity?.lineID)
+    }
+
+    private func appleTranslationLineIdentity(for lineID: UUID) -> AppleTranslationLineIdentity? {
+        guard let index = lines.firstIndex(where: { $0.id == lineID }) else { return nil }
+        let line = lines[index]
+        return AppleTranslationLineIdentity(
+            lineID: line.id,
+            sourceText: line.sourceText,
+            segmentID: appleSpeechSegmentIDByLineID[line.id],
+            revision: appleSpeechRevisionByLineID[line.id] ?? 0,
+            isFinal: line.isFinal
+        )
     }
 
     private func markTranslationUnavailable(_ message: String, for line: CaptionLine, matching sourceText: String) {
@@ -5337,6 +5789,9 @@ final class TranslationSessionStore {
     }
 
     private func setFloatingDisplayTranslation(_ translatedText: String, sourceText: String, resetsDwell: Bool) {
+        if PipelineDiagnostics.isEnabled {
+            PipelineDiagnostics.record("floating.translation", values: ["characters": Double(sourceText.count)])
+        }
         let normalizedDisplayed = normalizedTranscriptForComparison(floatingDisplayTranslationText)
         let normalizedCandidate = normalizedTranscriptForComparison(translatedText)
         let unreadLength = max(
@@ -5426,18 +5881,35 @@ final class TranslationSessionStore {
         speechOutput.speak(text, language: targetLanguage)
     }
 
-    private func speakTranslatedDeltaIfNeeded(_ translatedText: String, isFinal: Bool = false) {
+    private func speakTranslatedDeltaIfNeeded(_ translatedText: String, isFinal: Bool = false, appleLineID: UUID? = nil) {
         guard isRunning, !isPaused, isDubbingEnabled else { return }
         guard !isUsingProviderRealtimeTranslation else { return }
         guard translatedText != AppText.translating else { return }
 
-        guard let unspokenText = dubbingSpeechProgress.unspokenText(
-            from: translatedText,
-            languageID: targetLanguage.id,
-            isFinal: isFinal
-        ) else { return }
+        if let text = unspokenTranslatedText(translatedText, isFinal: isFinal, appleLineID: appleLineID) {
+            speak(text)
+        }
+    }
 
-        speak(unspokenText)
+    private func unspokenTranslatedText(_ translatedText: String, isFinal: Bool, appleLineID: UUID?) -> String? {
+        let unspokenText: String?
+        if let appleLineID {
+            if appleDubbingProgressByLineID[appleLineID] == nil {
+                appleDubbingProgressByLineID[appleLineID] = DubbingSpeechProgress()
+                appleDubbingLineOrder.append(appleLineID)
+                while appleDubbingLineOrder.count > 8 {
+                    appleDubbingProgressByLineID[appleDubbingLineOrder.removeFirst()] = nil
+                }
+            }
+            unspokenText = appleDubbingProgressByLineID[appleLineID]?.unspokenText(
+                from: translatedText, languageID: targetLanguage.id, isFinal: isFinal
+            )
+        } else {
+            unspokenText = dubbingSpeechProgress.unspokenText(
+                from: translatedText, languageID: targetLanguage.id, isFinal: isFinal
+            )
+        }
+        return unspokenText
     }
 
     private func commonPrefixLength(_ lhs: String, _ rhs: String) -> Int {
@@ -5451,6 +5923,8 @@ final class TranslationSessionStore {
 
     private func resetDubbingProgress() {
         dubbingSpeechProgress.reset()
+        appleDubbingProgressByLineID.removeAll()
+        appleDubbingLineOrder.removeAll()
         stopSpeaking()
     }
 
@@ -5801,6 +6275,9 @@ extension TranslationSessionStore: LiveSpeechTranscriberDelegate {
         confidence: Double
     ) {
         Task { @MainActor in
+            if PipelineDiagnostics.isEnabled {
+                PipelineDiagnostics.record("speech.received", values: ["characters": Double(text.count)])
+            }
             guard activeGeneration(for: transcriber, requiresRunning: true) != nil else {
                 return
             }
@@ -5808,6 +6285,36 @@ extension TranslationSessionStore: LiveSpeechTranscriberDelegate {
                 sourceText: text,
                 recognizedLanguage: language,
                 confidence: confidence
+            )
+        }
+    }
+
+    nonisolated func liveSpeechTranscriber(
+        _ transcriber: LiveSpeechTranscriber,
+        didRecognize text: String,
+        language: LanguageOption,
+        confidence: Double,
+        metadata: AppleSpeechRecognitionMetadata
+    ) {
+        Task { @MainActor in
+            if PipelineDiagnostics.isEnabled {
+                let nowUptime = ProcessInfo.processInfo.systemUptime
+                PipelineDiagnostics.record("speech.received", values: [
+                    "characters": Double(text.count),
+                    "final": metadata.isFinal ? 1 : 0,
+                    "audio_start": metadata.audioStartSeconds,
+                    "audio_end": metadata.audioEndSeconds,
+                    "dispatch_ms": max(0, (nowUptime - metadata.emittedAtUptime) * 1_000)
+                ])
+            }
+            guard activeGeneration(for: transcriber, requiresRunning: true) != nil else {
+                return
+            }
+            enqueueRecognizedCaption(
+                sourceText: text,
+                recognizedLanguage: language,
+                confidence: confidence,
+                metadata: metadata
             )
         }
     }

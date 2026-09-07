@@ -9,36 +9,19 @@ struct LongSessionCaptionPresentationTests {
     func standardSessionCoalescesLargeTranscriptUpdatesAndKeepsLatestText() async throws {
         let (session, directory) = try makeTranscriptionSession()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let transcriber = LiveSpeechTranscriber()
+        session.usesManualCaptionDeliveryForTesting = true
         let baseText = String(repeating: "long session transcript ", count: 180)
-
-        session.liveSpeechTranscriber(
-            transcriber,
-            didRecognize: baseText,
-            language: .english,
-            confidence: 0.9
-        )
-        #expect(await waitUntil { session.lines.last?.sourceText == baseText.trimmingCharacters(in: .whitespaces) })
-
+        session.receiveCaptionForTesting(baseText)
+        session.flushCaptionDeliveryForTesting()
         let initialRevision = session.lines.last?.revision
+
+        // 동일한 버스트를 한 실행 구간에 넣고 두 단계의 최신값 보존을 검증한다.
         for index in 1...100 {
-            session.liveSpeechTranscriber(
-                transcriber,
-                didRecognize: baseText + "latest \(index)",
-                language: .english,
-                confidence: 0.9
-            )
+            session.receiveCaptionForTesting(baseText + "latest \(index)")
         }
-
-        try await Task.sleep(for: .milliseconds(80))
         #expect(session.lines.last?.revision == initialRevision)
-
-        // This assertion verifies eventual coalescing. The separate 50k burst
-        // test owns the MainActor latency budget, so allow parallel test work
-        // enough time to schedule the latest coalesced delivery.
-        #expect(await waitUntil(timeout: 2.0) {
-            session.lines.last?.sourceText.hasSuffix("latest 100") == true
-        })
+        session.flushCaptionDeliveryForTesting()
+        #expect(session.lines.last?.sourceText.hasSuffix("latest 100") == true)
         #expect(session.lines.last?.revision == initialRevision.map { $0 + 1 })
     }
 

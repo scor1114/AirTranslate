@@ -197,8 +197,8 @@ struct AppleLifecycleP2Tests {
 
         let session = TranslationSessionStore(
             modelAvailabilityProvider: { _, _ in [:] },
-            transcriptsDirectoryURL: directory,
-            settingsDefaults: settingsDefaults
+            settingsDefaults: settingsDefaults,
+            transcriptsDirectoryURL: directory
         )
         session.isTranscriptPersistenceEnabled = true
         session.savedTranscriptContentMode = .original

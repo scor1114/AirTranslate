@@ -108,6 +108,13 @@ protocol LiveSpeechTranscriberDelegate: AnyObject {
     )
     func liveSpeechTranscriber(
         _ transcriber: LiveSpeechTranscriber,
+        didRecognize text: String,
+        language: LanguageOption,
+        confidence: Double,
+        metadata: AppleSpeechRecognitionMetadata
+    )
+    func liveSpeechTranscriber(
+        _ transcriber: LiveSpeechTranscriber,
         didTranslate text: String,
         language: LanguageOption,
         confidence: Double
@@ -126,6 +133,21 @@ protocol LiveSpeechTranscriberDelegate: AnyObject {
 }
 
 extension LiveSpeechTranscriberDelegate {
+    func liveSpeechTranscriber(
+        _ transcriber: LiveSpeechTranscriber,
+        didRecognize text: String,
+        language: LanguageOption,
+        confidence: Double,
+        metadata _: AppleSpeechRecognitionMetadata
+    ) {
+        liveSpeechTranscriber(
+            transcriber,
+            didRecognize: text,
+            language: language,
+            confidence: confidence
+        )
+    }
+
     func liveSpeechTranscriber(
         _ transcriber: LiveSpeechTranscriber,
         didTranslate text: String,
@@ -503,6 +525,7 @@ final class LiveSpeechTranscriber: @unchecked Sendable {
 
                 let resultTasks = transcribers.map { entry in
                     Task { [weak self] in
+                        var metadataBuilder = AppleSpeechRecognitionMetadataBuilder()
                         await producerStartGate.wait()
                         guard !Task.isCancelled else { return }
                         do {
@@ -510,12 +533,29 @@ final class LiveSpeechTranscriber: @unchecked Sendable {
                                 let text = String(result.text.characters)
                                     .trimmingCharacters(in: .whitespacesAndNewlines)
                                 guard !text.isEmpty else { continue }
+                                if PipelineDiagnostics.isEnabled {
+                                    PipelineDiagnostics.record("speech.result", values: [
+                                        "characters": Double(text.count),
+                                        "final": result.isFinal ? 1 : 0,
+                                        "audio_start": result.range.start.seconds,
+                                        "audio_end": result.range.end.seconds
+                                    ])
+                                }
                                 guard let self else { return }
+                                let metadata = metadataBuilder.metadata(
+                                    sourceText: text,
+                                    language: entry.language,
+                                    isFinal: result.isFinal,
+                                    audioRange: result.range,
+                                    emittedAt: Date(),
+                                    emittedAtUptime: ProcessInfo.processInfo.systemUptime
+                                )
                                 self.delegate?.liveSpeechTranscriber(
                                     self,
                                     didRecognize: text,
                                     language: entry.language,
-                                    confidence: Self.averageConfidence(in: result.text)
+                                    confidence: Self.averageConfidence(in: result.text),
+                                    metadata: metadata
                                 )
                             }
                         } catch {
@@ -616,6 +656,12 @@ final class LiveSpeechTranscriber: @unchecked Sendable {
             return
         }
 
+        if PipelineDiagnostics.isEnabled {
+            PipelineDiagnostics.record("speech.audio", values: [
+                "duration": Double(pcmBuffer.frameLength) / pcmBuffer.format.sampleRate,
+                "capture_time": CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+            ])
+        }
         inputQueue.yield(AnalyzerInput(buffer: pcmBuffer))
     }
 

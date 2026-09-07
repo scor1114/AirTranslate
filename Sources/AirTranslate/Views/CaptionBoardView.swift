@@ -238,27 +238,33 @@ private struct CaptionLineView: View, Equatable {
             VStack(alignment: .leading, spacing: AirTranslateDesign.Spacing.xs) {
                 if showsTranslationPane {
                     TurnTranscriptText(
+                        lineID: line.id,
                         title: AppText.original,
                         text: line.sourceText,
                         displayText: line.sourceDisplayText,
+                        holdsLiveRewrites: isLive,
                         font: AirTranslateDesign.Typography.captionOriginal,
                         lineSpacing: 4,
                         color: AirTranslateDesign.Palette.textSecondary
                     )
 
                     TurnTranscriptText(
+                        lineID: line.id,
                         title: AppText.translation,
                         text: line.translatedText,
                         displayText: line.translatedDisplayText,
+                        holdsLiveRewrites: isLive,
                         font: AirTranslateDesign.Typography.captionTranslation,
                         lineSpacing: 6,
                         color: AirTranslateDesign.Palette.textPrimary
                     )
                 } else {
                     TurnTranscriptText(
+                        lineID: line.id,
                         title: AppText.original,
                         text: line.sourceText,
                         displayText: line.sourceDisplayText,
+                        holdsLiveRewrites: isLive,
                         font: AirTranslateDesign.Typography.captionTranslation,
                         lineSpacing: 6,
                         color: AirTranslateDesign.Palette.textPrimary
@@ -273,18 +279,27 @@ private struct CaptionLineView: View, Equatable {
 }
 
 private struct TurnTranscriptText: View {
+    let lineID: UUID
     let title: String
     let text: String
     let displayText: String
+    let holdsLiveRewrites: Bool
     let font: Font
     let lineSpacing: CGFloat
     let color: Color
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var displayState = CaptionDisplayUpdatePolicy.State()
+    @State private var didInitializeDisplayState = false
+    @State private var displayHoldTask: Task<Void, Never>?
     @State private var isTextOverflowing = false
     @State private var isReadingBack = false
     @State private var isCopyFeedbackVisible = false
     @State private var copyFeedbackToken = 0
     @State private var isHovering = false
+    @FocusState private var isCopyFocused: Bool
+    @AccessibilityFocusState private var isCopyAccessibilityFocused: Bool
+
+    private let displayPolicy = CaptionDisplayUpdatePolicy()
 
     var body: some View {
         VStack(alignment: .leading, spacing: AirTranslateDesign.Spacing.xxs) {
@@ -311,16 +326,20 @@ private struct TurnTranscriptText: View {
                 }
                 .buttonStyle(AirTranslatePressButtonStyle())
                 .controlSize(.small)
-                .opacity(isHovering || isCopyFeedbackVisible ? 1 : 0)
+                .focused($isCopyFocused)
+                .accessibilityFocused($isCopyAccessibilityFocused)
+                .opacity(isCopyControlVisible ? 1 : 0)
+                .disabled(!canCopy)
                 .help(isCopyFeedbackVisible ? AppText.copied : AppText.copyTranscriptPane(title))
                 .accessibilityLabel(AppText.copyTranscriptPane(title))
                 .accessibilityValue(isCopyFeedbackVisible ? AppText.copied : AppText.copy)
                 .accessibilityRespondsToUserInteraction(true)
+                .accessibilityHidden(!canCopy)
             }
 
             if text.utf8.count > 4_000 && text.count > 4_000 {
                 ScrollableTranscriptText(
-                    text: displayText,
+                    text: visibleDisplayText,
                     weight: .medium,
                     pointSize: 22,
                     accessibilityLabel: title,
@@ -337,9 +356,11 @@ private struct TurnTranscriptText: View {
                 }
             } else {
                 StreamingTranscriptText(
-                    text: displayText,
+                    text: visibleDisplayText,
                     font: font,
-                    foregroundColor: color
+                    foregroundColor: color,
+                    streamsAppendedTextInChunks: false,
+                    replacementCrossfadeDuration: reduceMotion ? 0 : 0.1
                 )
                 .lineSpacing(lineSpacing)
             }
@@ -347,6 +368,19 @@ private struct TurnTranscriptText: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .onHover { isHovering = $0 }
         .animation(reduceMotion ? nil : AirTranslateDesign.Motion.quick, value: isHovering)
+        .onAppear {
+            applyDisplayUpdate(displayText, canHoldRewrite: holdsLiveRewrites)
+        }
+        .onChange(of: displayText) { _, newDisplayText in
+            applyDisplayUpdate(newDisplayText, canHoldRewrite: holdsLiveRewrites)
+        }
+        .onChange(of: holdsLiveRewrites) { _, canHoldRewrite in
+            applyDisplayUpdate(displayText, canHoldRewrite: canHoldRewrite)
+        }
+        .onDisappear {
+            displayHoldTask?.cancel()
+            displayHoldTask = nil
+        }
         .task(id: copyFeedbackToken) {
             guard isCopyFeedbackVisible else { return }
 
@@ -357,6 +391,14 @@ private struct TurnTranscriptText: View {
                 isCopyFeedbackVisible = false
             }
         }
+    }
+
+    private var visibleDisplayText: String {
+        didInitializeDisplayState ? displayState.visibleText : displayText
+    }
+
+    private var isCopyControlVisible: Bool {
+        isHovering || isCopyFeedbackVisible || isCopyFocused || isCopyAccessibilityFocused
     }
 
     private var canCopy: Bool {
@@ -379,6 +421,66 @@ private struct TurnTranscriptText: View {
         withAnimation(reduceMotion ? nil : AirTranslateDesign.Motion.quick) {
             isCopyFeedbackVisible = true
         }
+    }
+
+    private func applyDisplayUpdate(_ candidateText: String, canHoldRewrite: Bool) {
+        let previousText = didInitializeDisplayState ? displayState.visibleText : ""
+        if !didInitializeDisplayState {
+            displayState.visibleText = visibleDisplayText
+            didInitializeDisplayState = true
+        }
+
+        displayHoldTask?.cancel()
+
+        let decision = displayPolicy.receive(
+            candidateText,
+            at: Date(),
+            // 대기 문구는 읽기 시간을 보호할 번역 결과가 아니다.
+            canHoldRewrite: canHoldRewrite && displayState.visibleText != AppText.translating,
+            state: &displayState
+        )
+        handleDisplayDecision(decision)
+        recordDisplayChange(from: previousText)
+    }
+
+    private func handleDisplayDecision(_ decision: CaptionDisplayUpdatePolicy.Decision) {
+        switch decision {
+        case .unchanged, .published:
+            displayHoldTask = nil
+        case .held(let holdUntil):
+            scheduleDisplayFlush(at: holdUntil)
+        }
+    }
+
+    private func scheduleDisplayFlush(at holdUntil: Date) {
+        let delay = max(0, holdUntil.timeIntervalSinceNow)
+        let nanoseconds = UInt64((delay * 1_000_000_000).rounded(.up))
+
+        displayHoldTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+
+            let previousText = displayState.visibleText
+            let decision = displayPolicy.flushDueRewrite(at: Date(), state: &displayState)
+            handleDisplayDecision(decision)
+            recordDisplayChange(from: previousText)
+        }
+    }
+
+    private func recordDisplayChange(from previousText: String) {
+        guard PipelineDiagnostics.isEnabled,
+              previousText != displayState.visibleText,
+              displayState.visibleText != AppText.translating else { return }
+        let replacesReadableText = !previousText.isEmpty && previousText != AppText.translating
+            && !displayState.visibleText.hasPrefix(previousText)
+        PipelineDiagnostics.record(
+            title == AppText.translation ? "board.translation" : "board.source",
+            id: lineID.uuidString,
+            values: [
+                "characters": Double(displayState.visibleText.count),
+                "rewrite": replacesReadableText ? 1 : 0
+            ]
+        )
     }
 }
 

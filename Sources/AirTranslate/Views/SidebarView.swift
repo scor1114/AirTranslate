@@ -33,6 +33,7 @@ enum ProcessingEngine: String, CaseIterable, Identifiable {
     case gptTranscription
     case gemini
     case meta
+    case azure
 
     var id: String { rawValue }
 
@@ -42,12 +43,14 @@ enum ProcessingEngine: String, CaseIterable, Identifiable {
         case .gpt: AppText.gptMode
         case .gptTranscription: AppText.gptTranscriptionMode
         case .gemini: AppText.geminiModels
+        case .azure: AzureMAICopy.title
         case .meta: AppText.metaScribe
         }
     }
 
     @MainActor
     static func current(for session: TranslationSessionStore) -> ProcessingEngine {
+        if session.isUsingAzureMAI { return .azure }
         if session.isUsingMetaScribe { return .meta }
         if session.isUsingGPTTranscriptionMode { return .gptTranscription }
         if session.openAITranscriptionModel.isEnabled || session.openAITranslationModel.isEnabled {
@@ -125,6 +128,7 @@ struct StageHeaderView: View {
         switch ProcessingEngine.current(for: session) {
         case .gpt, .gptTranscription: !session.hasOpenAIAPIKey
         case .gemini: !session.hasGeminiAPIKey
+        case .azure: !session.hasAzureSpeechAPIKey || (try? AzureMAITranscriber.endpointURL(session.azureSpeechEndpoint)) == nil
         case .meta: !session.hasMetaAPIKey
         case .apple: false
         }
@@ -134,6 +138,7 @@ struct StageHeaderView: View {
         switch ProcessingEngine.current(for: session) {
         case .gpt, .gptTranscription: AppText.openAIAPIKeyNotConfigured
         case .gemini: AppText.geminiAPIKeyNotConfigured
+        case .azure: AzureMAICopy.configurationRequired
         case .meta: AppText.metaAPIKeyNotConfigured
         case .apple: AppText.configureTranslationSettings
         }
