@@ -2,6 +2,8 @@
 
 This folder contains reproducible release materials for the Apache 2.0 open-source AirTranslate project.
 
+This branch builds fork version **1.8.0 / 180.1**, not an upstream release. See [FORK.md](../FORK.md).
+
 ## What This Adds
 
 - A repeatable local app-bundle and ZIP build script.
@@ -21,7 +23,7 @@ This folder contains reproducible release materials for the Apache 2.0 open-sour
 Override the defaults when needed:
 
 ```bash
-BUNDLE_ID="com.example.AirTranslate" VERSION="1.8.0" BUILD_NUMBER="180"
+BUNDLE_ID="com.example.AirTranslate" VERSION="1.8.0" BUILD_NUMBER="180.1"
 ```
 
 ## Local Release Build

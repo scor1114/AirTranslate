@@ -192,6 +192,216 @@ struct TranslationSessionStoreLanguageCandidateTests {
 
     @Test
     @MainActor
+    func deletingSavedTranscriptAlsoDeletesItsRecording() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateDeleteTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let baseName = "2026-08-15_13-00_Meeting"
+        let sourceURL = directory.appendingPathComponent("\(baseName)_original.txt")
+        let translationURL = directory.appendingPathComponent("\(baseName)_translation.txt")
+        let recordingURL = directory.appendingPathComponent("\(baseName).m4a")
+        try "Meeting transcript".write(to: sourceURL, atomically: true, encoding: .utf8)
+        try "회의 기록".write(to: translationURL, atomically: true, encoding: .utf8)
+        try Data([0]).write(to: recordingURL)
+
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory
+        )
+        let transcript = try #require(session.savedTranscripts.first)
+        session.selectSavedTranscript(transcript.id)
+        session.deleteSelectedTranscript()
+
+        #expect(!FileManager.default.fileExists(atPath: sourceURL.path))
+        #expect(!FileManager.default.fileExists(atPath: translationURL.path))
+        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+    }
+
+    @Test
+    @MainActor
+    func recordingAssociationCollisionReportsPreservedSourceFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateRecordingCollisionTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let sourceURL = directory.appendingPathComponent("2026-08-16_10-00-00_microphone.m4a")
+        let destinationURL = directory.appendingPathComponent("Meeting.m4a")
+        try Data([1]).write(to: sourceURL)
+        try Data([2]).write(to: destinationURL)
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory
+        )
+
+        session.associateRecordingForTesting(
+            sourceURL,
+            withTranscriptBaseFileName: "Meeting.txt"
+        )
+
+        #expect(try Data(contentsOf: sourceURL) == Data([1]))
+        #expect(try Data(contentsOf: destinationURL) == Data([2]))
+        #expect(
+            session.statusMessage
+                == AppText.audioRecordingSavedSeparately(sourceURL.lastPathComponent)
+        )
+    }
+
+    @Test
+    @MainActor
+    func deletingAllSavedTranscriptsAlsoDeletesOrphanedRecordings() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateDeleteAllTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let transcriptURL = directory.appendingPathComponent("Meeting.txt")
+        let recordingURL = directory.appendingPathComponent("legacy-recording.m4a")
+        let unrelatedURL = directory.appendingPathComponent("keep.json")
+        try "Meeting transcript".write(to: transcriptURL, atomically: true, encoding: .utf8)
+        try Data([0]).write(to: recordingURL)
+        try Data([0]).write(to: unrelatedURL)
+
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory
+        )
+        session.deleteAllSavedTranscripts()
+
+        #expect(!FileManager.default.fileExists(atPath: transcriptURL.path))
+        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+        #expect(FileManager.default.fileExists(atPath: unrelatedURL.path))
+    }
+
+    @Test
+    @MainActor
+    func audioOnlyRecordingAppearsInLibraryAndCanBeDeleted() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateAudioOnlyTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recordingURL = directory.appendingPathComponent("2026-08-16_09-00-00_microphone.m4a")
+        try Data([0]).write(to: recordingURL)
+
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory
+        )
+        let recording = try #require(session.savedTranscripts.first)
+
+        #expect(recording.isAudioOnly)
+        #expect(recording.recordingFileName == recordingURL.lastPathComponent)
+
+        session.selectSavedTranscript(recording.id)
+        session.deleteSelectedTranscript()
+
+        #expect(!FileManager.default.fileExists(atPath: recordingURL.path))
+    }
+
+    @Test
+    @MainActor
+    func activeRecordingIsHiddenAndProtectedFromDeletion() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateActiveRecordingTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writer = AudioRecordingWriter(
+            directoryURL: directory,
+            inputSource: .microphone,
+            startedAt: Date(timeIntervalSince1970: 0)
+        )
+        try writer.appendPCM16(Data(count: 16_000 * MemoryLayout<Int16>.size), sampleRate: 16_000)
+        let activeURL = try #require(writer.fileURL)
+
+        let registry = AudioSamplePipelineRegistry()
+        let sessionBeforePublish = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory,
+            audioSamplePipelineRegistry: registry
+        )
+        let activeRecording = try #require(sessionBeforePublish.savedTranscripts.first)
+        sessionBeforePublish.selectSavedTranscript(activeRecording.id)
+
+        registry.publish(
+            generation: 1,
+            transcriber: LiveSpeechTranscriber(),
+            openAITranscriber: OpenAIRealtimeTranscriber(),
+            geminiLiveTranslator: GeminiLiveTranslationService(),
+            metaVoiceTranscriber: MetaVoiceTranscribeService(),
+            azureMAITranscriber: AzureMAITranscriber(),
+            recordingWriter: writer,
+            recordingFailure: { _ in }
+        )
+        sessionBeforePublish.deleteSelectedTranscript()
+        #expect(FileManager.default.fileExists(atPath: activeURL.path))
+
+        let removableTranscriptURL = directory.appendingPathComponent("old.txt")
+        let removableRecordingURL = directory.appendingPathComponent("old.m4a")
+        try "old transcript".write(to: removableTranscriptURL, atomically: true, encoding: .utf8)
+        try Data([0]).write(to: removableRecordingURL)
+
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory,
+            audioSamplePipelineRegistry: registry
+        )
+        #expect(!session.savedTranscripts.contains { $0.recordingFileName == activeURL.lastPathComponent })
+
+        session.deleteAllSavedTranscripts()
+
+        #expect(FileManager.default.fileExists(atPath: activeURL.path))
+        #expect(!FileManager.default.fileExists(atPath: removableTranscriptURL.path))
+        #expect(!FileManager.default.fileExists(atPath: removableRecordingURL.path))
+        _ = await registry.beginClear().value
+    }
+
+    @Test
+    @MainActor
+    func deletingActiveRecordingShowsBlockedToast() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AirTranslateActiveRecordingToastTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writer = AudioRecordingWriter(
+            directoryURL: directory,
+            inputSource: .microphone,
+            startedAt: Date(timeIntervalSince1970: 0)
+        )
+        try writer.appendPCM16(Data(count: 16_000 * MemoryLayout<Int16>.size), sampleRate: 16_000)
+        let activeURL = try #require(writer.fileURL)
+        let registry = AudioSamplePipelineRegistry()
+        let session = TranslationSessionStore(
+            modelAvailabilityProvider: { _, _ in [:] },
+            transcriptsDirectoryURL: directory,
+            audioSamplePipelineRegistry: registry
+        )
+        let recording = try #require(session.savedTranscripts.first)
+        session.selectSavedTranscript(recording.id)
+        registry.publish(
+            generation: 1,
+            transcriber: LiveSpeechTranscriber(),
+            openAITranscriber: OpenAIRealtimeTranscriber(),
+            geminiLiveTranslator: GeminiLiveTranslationService(),
+            metaVoiceTranscriber: MetaVoiceTranscribeService(),
+            azureMAITranscriber: AzureMAITranscriber(),
+            recordingWriter: writer,
+            recordingFailure: { _ in }
+        )
+
+        session.deleteSelectedTranscript()
+
+        #expect(FileManager.default.fileExists(atPath: activeURL.path))
+        #expect(session.toastMessage == AppText.activeRecordingCannotBeDeleted)
+        _ = await registry.beginClear().value
+    }
+
+    @Test
+    @MainActor
     func transcribeOnlyModeHidesTranslationPane() {
         let session = TranslationSessionStore()
 
@@ -536,6 +746,13 @@ struct TranslationSessionStoreLanguageCandidateTests {
 
         session.liveSpeechTranscriber(
             transcriber,
+            didRecognizeSourceTranscript: "Hello from",
+            confidence: 0.5
+        )
+        await Task.yield()
+
+        session.liveSpeechTranscriber(
+            transcriber,
             didRecognizeSourceTranscript: "Hello from the source audio.",
             confidence: 0.5
         )
@@ -546,14 +763,38 @@ struct TranslationSessionStoreLanguageCandidateTests {
 
         session.liveSpeechTranscriber(
             transcriber,
-            didTranslate: "원본 오디오에서 안녕하세요.",
+            didTranslate: "이것들은 구매해서",
+            language: .korean,
+            confidence: 0.5
+        )
+        await Task.yield()
+
+        session.liveSpeechTranscriber(
+            transcriber,
+            didTranslate: "이것들은 구매해서 여러 사이트로 배송되고",
+            language: .korean,
+            confidence: 0.5
+        )
+        await Task.yield()
+
+        session.liveSpeechTranscriber(
+            transcriber,
+            didTranslate: "거기서 안전성과 효능성 연구에 쓰입니다",
+            language: .korean,
+            confidence: 0.5
+        )
+        await Task.yield()
+
+        session.liveSpeechTranscriber(
+            transcriber,
+            didTranslate: "그리고 같은 배치의 세포가 환자에게도 사용됐습니다",
             language: .korean,
             confidence: 0.5
         )
         await Task.yield()
 
         #expect(session.lines.first?.sourceText == "Hello from the source audio.")
-        #expect(session.lines.first?.translatedText == "원본 오디오에서 안녕하세요.")
+        #expect(session.lines.first?.translatedText == "이것들은 구매해서 여러 사이트로 배송되고 거기서 안전성과 효능성 연구에 쓰입니다. 그리고 같은 배치의 세포가 환자에게도 사용됐습니다")
     }
 
     @Test

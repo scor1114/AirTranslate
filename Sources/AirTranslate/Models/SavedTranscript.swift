@@ -5,12 +5,17 @@ struct SavedTranscript: Identifiable, Equatable {
     var title: String
     var sourceText: String
     var translatedText: String?
-    var sourceFileName: String
+    var sourceFileName: String?
     var translationFileName: String?
+    var recordingFileName: String?
     var updatedAt: Date
 
     var isOriginalAndTranslation: Bool {
         translatedText != nil && translationFileName != nil
+    }
+
+    var isAudioOnly: Bool {
+        sourceFileName == nil && recordingFileName != nil
     }
 
     init(
@@ -24,6 +29,7 @@ struct SavedTranscript: Identifiable, Equatable {
         self.translatedText = nil
         self.sourceFileName = fileName
         self.translationFileName = nil
+        self.recordingFileName = nil
         self.updatedAt = updatedAt
     }
 
@@ -41,6 +47,18 @@ struct SavedTranscript: Identifiable, Equatable {
         self.translatedText = translatedText
         self.sourceFileName = sourceFileName
         self.translationFileName = translationFileName
+        self.recordingFileName = nil
+        self.updatedAt = updatedAt
+    }
+
+    init(recordingFileName: String, updatedAt: Date) {
+        self.id = recordingFileName
+        self.title = SavedTranscript.title(from: "", fallback: recordingFileName)
+        self.sourceText = ""
+        self.translatedText = nil
+        self.sourceFileName = nil
+        self.translationFileName = nil
+        self.recordingFileName = recordingFileName
         self.updatedAt = updatedAt
     }
 
@@ -52,7 +70,7 @@ struct SavedTranscript: Identifiable, Equatable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard let title, !title.isEmpty else {
-            return fallback.replacingOccurrences(of: ".txt", with: "")
+            return URL(fileURLWithPath: fallback).deletingPathExtension().lastPathComponent
         }
 
         return String(title.prefix(48))

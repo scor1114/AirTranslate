@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import OSLog
 
 enum RealtimeAudioTransportProvider: String, Sendable {
     case openAI
@@ -29,14 +30,29 @@ struct RealtimeAudioTransportDegradation: Equatable, Sendable {
 }
 
 final class OpenAIRealtimeTranscriber: @unchecked Sendable {
+    private static let logger = Logger(subsystem: "dev.appcaster.AirTranslate", category: "OpenAIRealtime")
+    private enum TranslationMilestone: String {
+        case sessionUpdateSent, sessionCreated, sessionUpdated
+        case audioConverted, audioConversionEmpty, audioSent
+        case sourceTranscript, translatedTranscript, outputAudio
+        case serverError, receiveFailed, binaryFrameIgnored, invalidJSON
+    }
+    private var loggedTranslationMilestones = Set<TranslationMilestone>()
     private static let realtimeAudioSampleRate = 24_000
     private static let maxAudioChunkMilliseconds = 80
     private static let bytesPerPCM16Sample = 2
+    static let maximumUncommittedTranscriptionAudioByteCount = realtimeAudioSampleRate
+        * bytesPerPCM16Sample
+        * 15
+    static let minimumTranscriptionCommitAudioByteCount = realtimeAudioSampleRate
+        * bytesPerPCM16Sample
+        / 10
     private static let maxPCM16AudioChunkByteCount = realtimeAudioSampleRate
         * bytesPerPCM16Sample
         * maxAudioChunkMilliseconds
         / 1_000
     private static let maxPendingAudioSendCount = 48
+    private static let transcriptionFinalizationTimeout: TimeInterval = 5
     private static let realtimeTranscriptPublishInterval: TimeInterval = 0.05
     static let maximumTrackedRealtimeTimelineItemCount = 256
     private static let missingLifecycleMetadataGraceRegistrations = 8
@@ -84,6 +100,13 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     private var outputMode = OutputMode.transcription
     private var isPaused = false
     private var pendingAudioSendCount = 0
+    private var hasUncommittedTranscriptionAudio = false
+    private var uncommittedTranscriptionAudioByteCount = 0
+    private var isTranscriptionCommitPending = false
+    private var nextTranscriptionCommitID: UInt64 = 0
+    private var transcriptionCommitIDsAwaitingAcknowledgement: [UInt64] = []
+    private var transcriptionCommitIDByItemID: [String: UInt64] = [:]
+    private var outstandingTranscriptionCommitIDs = Set<UInt64>()
     private var droppedAudioChunkCount = 0
     private var droppedAudioByteCount = 0
     private var audioTransportDegradationHandler:
@@ -110,6 +133,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     private var realtimeTranscriptsQueuedForDeliveryHook: (() -> Void)?
     private var realtimeEventValidatedBeforeMutationHook: (() -> Void)?
     private var realtimeTimelineMutationValidatedHook: (() -> Void)?
+    private var finishPendingTranscriptionAudioHook: (@Sendable () async -> Bool)?
     #endif
     private let realtimeTranslationInputPublishThrottle = RealtimeTranscriptPublishThrottle(
         publishInterval: OpenAIRealtimeTranscriber.realtimeTranscriptPublishInterval
@@ -176,29 +200,52 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         }
     }
 
-    func start(language: LanguageOption, model: OpenAIRealtimeTranscriptionModel) async throws {
+    func start(
+        language: LanguageOption,
+        model: OpenAIRealtimeTranscriptionModel,
+        audioInputSource: AudioInputSource
+    ) async throws {
         try await start(
-            language: language,
-            modelID: model.rawValue,
-            outputMode: .transcription,
-            isEnabled: model.isEnabled
+            languages: [language],
+            model: model,
+            audioInputSource: audioInputSource
         )
     }
 
-    func startRealtimeTranslationOnly(language: LanguageOption, model: OpenAIRealtimeTranslationModel) async throws {
+    func start(
+        languages: [LanguageOption],
+        model: OpenAIRealtimeTranscriptionModel,
+        audioInputSource: AudioInputSource
+    ) async throws {
         try await start(
-            language: language,
+            languages: languages,
+            modelID: model.rawValue,
+            outputMode: .transcription,
+            isEnabled: model.isEnabled,
+            audioInputSource: audioInputSource
+        )
+    }
+
+    func startRealtimeTranslationOnly(
+        language: LanguageOption,
+        model: OpenAIRealtimeTranslationModel,
+        audioInputSource: AudioInputSource
+    ) async throws {
+        try await start(
+            languages: [language],
             modelID: model.apiModelID,
             outputMode: .translationOnly,
-            isEnabled: model.usesRealtimeAudioTranslation
+            isEnabled: model.usesRealtimeAudioTranslation,
+            audioInputSource: audioInputSource
         )
     }
 
     private func start(
-        language: LanguageOption,
+        languages: [LanguageOption],
         modelID: String,
         outputMode: OutputMode,
-        isEnabled: Bool
+        isEnabled: Bool,
+        audioInputSource: AudioInputSource
     ) async throws {
         let startIntentGeneration = stop()
 
@@ -206,11 +253,14 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         guard let apiKey = try OpenAIAPIKeyStore.readAPIKey(), !apiKey.isEmpty else {
             throw OpenAITranslationError.missingAPIKey
         }
+        guard let callbackLanguage = languages.first else {
+            throw OpenAIRealtimeTranscriberError.connectionFailed
+        }
 
         let url: URL
         switch outputMode {
         case .transcription:
-            url = URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!
+            url = Self.transcriptionWebSocketURL
         case .translationOnly:
             url = URL(string: "wss://api.openai.com/v1/realtime/translations?model=\(modelID)")!
         }
@@ -222,7 +272,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         let generation = stateLock.withLock { () -> UInt64? in
             guard connectionGeneration == startIntentGeneration else { return nil }
             connectionGeneration &+= 1
-            self.language = language
+            self.language = callbackLanguage
             self.outputMode = outputMode
             self.webSocketTask = webSocketTask
             isPaused = false
@@ -236,9 +286,10 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
 
         do {
             try await sendSessionUpdate(
-                language: language,
+                languages: languages,
                 modelID: modelID,
                 outputMode: outputMode,
+                audioInputSource: audioInputSource,
                 webSocketTask: webSocketTask,
                 generation: generation
             )
@@ -284,6 +335,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         conversionLock.lock()
         let audioChunks = pcm16Base64AudioChunks(from: sampleBuffer)
         conversionLock.unlock()
+        logTranslationMilestone(audioChunks.isEmpty ? .audioConversionEmpty : .audioConverted, generation: generation)
 
         for audio in audioChunks {
             let event = OpenAIRealtimeAudioAppendEvent(
@@ -294,13 +346,15 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                   let text = String(data: data, encoding: .utf8) else { continue }
             guard reserveAudioSendSlot(
                 audioByteCount: Self.decodedAudioByteCount(audio),
-                generation: generation
+                generation: generation,
+                marksUncommittedTranscriptionAudio: true
             ) else {
                 continue
             }
 
             webSocketTask.send(.string(text)) { [weak self] error in
                 self?.releaseAudioSendSlot(generation: generation)
+                if error == nil { self?.logTranslationMilestone(.audioSent, generation: generation) }
                 guard let error, let self else { return }
                 self.publishFailureIfCurrent(
                     Self.publicConnectionError(from: error),
@@ -314,6 +368,82 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         stateLock.lock()
         self.isPaused = isPaused
         stateLock.unlock()
+    }
+
+    func commitTranscriptionAudio() {
+        stateLock.lock()
+        guard !isPaused, outputMode == .transcription else {
+            stateLock.unlock()
+            return
+        }
+        if pendingAudioSendCount > 0 {
+            isTranscriptionCommitPending = hasUncommittedTranscriptionAudio
+            stateLock.unlock()
+            return
+        }
+        let request = prepareTranscriptionCommitLocked(allowsPaused: false)
+        stateLock.unlock()
+        sendTranscriptionCommit(request)
+    }
+
+    @discardableResult
+    func finishPendingTranscriptionAudio() async -> Bool {
+        #if DEBUG
+        if let hook = stateLock.withLock({ finishPendingTranscriptionAudioHook }) {
+            return await hook()
+        }
+        #endif
+        return await finishPendingTranscriptionAudio(
+            phaseTimeout: Self.transcriptionFinalizationTimeout
+        )
+    }
+
+    private func finishPendingTranscriptionAudio(phaseTimeout: TimeInterval) async -> Bool {
+        guard let context = stateLock.withLock({ () -> (UInt64, Set<UInt64>)? in
+            guard outputMode == .transcription, webSocketTask != nil else { return nil }
+            isPaused = true
+            isTranscriptionCommitPending = false
+            return (connectionGeneration, outstandingTranscriptionCommitIDs)
+        }) else {
+            return true
+        }
+        let generation = context.0
+        var commitIDsToFinish = context.1
+
+        let sendDeadline = Date().addingTimeInterval(phaseTimeout)
+        while Date() < sendDeadline {
+            let sendsFinished = stateLock.withLock {
+                connectionGeneration != generation || pendingAudioSendCount == 0
+            }
+            if sendsFinished { break }
+            try? await Task.sleep(for: .milliseconds(20))
+            if Task.isCancelled { return false }
+        }
+
+        let preparedCommit = stateLock.withLock { () -> (Bool, TranscriptionCommitRequest?) in
+            guard connectionGeneration == generation, pendingAudioSendCount == 0 else {
+                return (false, nil)
+            }
+            return (true, prepareTranscriptionCommitLocked(allowsPaused: true))
+        }
+        guard preparedCommit.0 else { return false }
+        let request = preparedCommit.1
+        if let request {
+            commitIDsToFinish.insert(request.id)
+        }
+        sendTranscriptionCommit(request)
+
+        let acknowledgementDeadline = Date().addingTimeInterval(phaseTimeout)
+        while Date() < acknowledgementDeadline {
+            let isFinished = stateLock.withLock {
+                connectionGeneration != generation
+                    || outstandingTranscriptionCommitIDs.isDisjoint(with: commitIDsToFinish)
+            }
+            if isFinished { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+            if Task.isCancelled { return false }
+        }
+        return false
     }
 
     @discardableResult
@@ -340,8 +470,15 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         self.webSocketTask = nil
         isPaused = false
         pendingAudioSendCount = 0
+        hasUncommittedTranscriptionAudio = false
+        uncommittedTranscriptionAudioByteCount = 0
+        isTranscriptionCommitPending = false
+        transcriptionCommitIDsAwaitingAcknowledgement.removeAll()
+        transcriptionCommitIDByItemID.removeAll()
+        outstandingTranscriptionCommitIDs.removeAll()
         droppedAudioChunkCount = 0
         droppedAudioByteCount = 0
+        loggedTranslationMilestones.removeAll()
         stateLock.unlock()
         waitForRealtimeTranscriptDeliveries(generation: stoppingGeneration)
         terminalTranscripts.forEach { text in
@@ -364,20 +501,25 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     }
 
     @discardableResult
-    func reserveAudioSendSlot(audioByteCount: Int) -> Bool {
+    func reserveAudioSendSlot(
+        audioByteCount: Int,
+        marksUncommittedTranscriptionAudio: Bool = false
+    ) -> Bool {
         stateLock.lock()
         let generation = connectionGeneration
         stateLock.unlock()
         return reserveAudioSendSlot(
             audioByteCount: audioByteCount,
-            generation: generation
+            generation: generation,
+            marksUncommittedTranscriptionAudio: marksUncommittedTranscriptionAudio
         )
     }
 
     @discardableResult
     private func reserveAudioSendSlot(
         audioByteCount: Int,
-        generation: UInt64
+        generation: UInt64,
+        marksUncommittedTranscriptionAudio: Bool = false
     ) -> Bool {
         stateLock.lock()
         guard connectionGeneration == generation,
@@ -397,6 +539,14 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         }
 
         pendingAudioSendCount += 1
+        if marksUncommittedTranscriptionAudio, outputMode == .transcription {
+            hasUncommittedTranscriptionAudio = true
+            uncommittedTranscriptionAudioByteCount += max(0, audioByteCount)
+            if uncommittedTranscriptionAudioByteCount
+                >= Self.maximumUncommittedTranscriptionAudioByteCount {
+                isTranscriptionCommitPending = true
+            }
+        }
         stateLock.unlock()
         return true
     }
@@ -415,6 +565,110 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             return
         }
         pendingAudioSendCount = max(0, pendingAudioSendCount - 1)
+        let request = pendingAudioSendCount == 0 && isTranscriptionCommitPending
+            ? prepareTranscriptionCommitLocked(allowsPaused: true)
+            : nil
+        stateLock.unlock()
+        sendTranscriptionCommit(request)
+    }
+
+    private func prepareTranscriptionCommitLocked(
+        allowsPaused: Bool
+    ) -> TranscriptionCommitRequest? {
+        guard outputMode == .transcription,
+              allowsPaused || !isPaused,
+              let webSocketTask,
+              hasUncommittedTranscriptionAudio,
+              Self.hasMinimumTranscriptionCommitAudio(uncommittedTranscriptionAudioByteCount)
+        else { return nil }
+
+        nextTranscriptionCommitID &+= 1
+        let id = nextTranscriptionCommitID
+        hasUncommittedTranscriptionAudio = false
+        uncommittedTranscriptionAudioByteCount = 0
+        isTranscriptionCommitPending = false
+        transcriptionCommitIDsAwaitingAcknowledgement.append(id)
+        outstandingTranscriptionCommitIDs.insert(id)
+        return TranscriptionCommitRequest(
+            id: id,
+            webSocketTask: webSocketTask,
+            generation: connectionGeneration
+        )
+    }
+
+    private func sendTranscriptionCommit(_ request: TranscriptionCommitRequest?) {
+        guard let request,
+              let data = try? Self.transcriptionAudioCommitData(),
+              let text = String(data: data, encoding: .utf8)
+        else { return }
+
+        request.webSocketTask.send(.string(text)) { [weak self] error in
+            guard let self, let error else { return }
+            self.failTranscriptionCommit(id: request.id, generation: request.generation)
+            self.publishFailureIfCurrent(
+                Self.publicConnectionError(from: error),
+                generation: request.generation
+            )
+        }
+    }
+
+    private func failTranscriptionCommit(id: UInt64, generation: UInt64) {
+        stateLock.lock()
+        guard connectionGeneration == generation else {
+            stateLock.unlock()
+            return
+        }
+        transcriptionCommitIDsAwaitingAcknowledgement.removeAll { $0 == id }
+        transcriptionCommitIDByItemID = transcriptionCommitIDByItemID.filter { $0.value != id }
+        outstandingTranscriptionCommitIDs.remove(id)
+        stateLock.unlock()
+    }
+
+    private func failOutstandingTranscriptionCommits(generation: UInt64) {
+        stateLock.withLock {
+            guard connectionGeneration == generation else { return }
+            hasUncommittedTranscriptionAudio = false
+            uncommittedTranscriptionAudioByteCount = 0
+            isTranscriptionCommitPending = false
+            clearOutstandingTranscriptionCommitWaitsLocked()
+        }
+    }
+
+    private func clearOutstandingTranscriptionCommitWaits(generation: UInt64) {
+        stateLock.withLock {
+            guard connectionGeneration == generation else { return }
+            clearOutstandingTranscriptionCommitWaitsLocked()
+        }
+    }
+
+    private func clearOutstandingTranscriptionCommitWaitsLocked() {
+        transcriptionCommitIDsAwaitingAcknowledgement.removeAll()
+        transcriptionCommitIDByItemID.removeAll()
+        outstandingTranscriptionCommitIDs.removeAll()
+    }
+
+    private func acknowledgeTranscriptionCommit(itemID: String, generation: UInt64) {
+        stateLock.lock()
+        guard connectionGeneration == generation,
+              !transcriptionCommitIDsAwaitingAcknowledgement.isEmpty
+        else {
+            stateLock.unlock()
+            return
+        }
+        transcriptionCommitIDByItemID[itemID] = transcriptionCommitIDsAwaitingAcknowledgement.removeFirst()
+        stateLock.unlock()
+    }
+
+    private func completeTranscriptionCommit(itemID: String?, generation: UInt64) {
+        guard let itemID, !itemID.isEmpty else { return }
+        stateLock.lock()
+        guard connectionGeneration == generation,
+              let commitID = transcriptionCommitIDByItemID.removeValue(forKey: itemID)
+        else {
+            stateLock.unlock()
+            return
+        }
+        outstandingTranscriptionCommitIDs.remove(commitID)
         stateLock.unlock()
     }
 
@@ -445,35 +699,26 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
     }
 
     private func sendSessionUpdate(
-        language: LanguageOption,
+        languages: [LanguageOption],
         modelID: String,
         outputMode: OutputMode,
+        audioInputSource: AudioInputSource,
         webSocketTask: URLSessionWebSocketTask,
         generation: UInt64
     ) async throws {
         let data: Data
         switch outputMode {
         case .transcription:
-            data = try Self.transcriptionSessionUpdateData(language: language, modelID: modelID)
-        case .translationOnly:
-            let event = OpenAIRealtimeTranslationSessionUpdateEvent(
-                session: OpenAIRealtimeTranslationSession(
-                    audio: OpenAIRealtimeTranslationAudio(
-                        input: OpenAIRealtimeTranslationAudioInput(
-                            format: OpenAIRealtimeAudioFormat(type: "audio/pcm", rate: Self.realtimeAudioSampleRate),
-                            transcription: OpenAIRealtimeTranslationInputTranscription(
-                                model: OpenAIRealtimeTranscriptionModel.gptRealtimeWhisper.rawValue
-                            ),
-                            turnDetection: .lowLatencyServerVAD,
-                            noiseReduction: OpenAIRealtimeNoiseReduction(type: "near_field")
-                        ),
-                        output: OpenAIRealtimeTranslationAudioOutput(
-                            language: language.openAILanguageCode
-                        )
-                    )
-                )
+            data = try Self.transcriptionSessionUpdateData(
+                languages: languages,
+                modelID: modelID,
+                audioInputSource: audioInputSource
             )
-            data = try JSONEncoder().encode(event)
+        case .translationOnly:
+            guard let language = languages.first else {
+                throw OpenAIRealtimeTranscriberError.connectionFailed
+            }
+            data = try Self.translationSessionUpdateData(language: language, audioInputSource: audioInputSource)
         }
         guard let text = String(data: data, encoding: .utf8) else { return }
         try await send(
@@ -481,9 +726,32 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             webSocketTask: webSocketTask,
             generation: generation
         )
+        logTranslationMilestone(.sessionUpdateSent, generation: generation)
     }
 
-    static func transcriptionSessionUpdateData(language: LanguageOption, modelID: String) throws -> Data {
+    static func transcriptionSessionUpdateData(
+        language: LanguageOption,
+        modelID: String,
+        audioInputSource: AudioInputSource
+    ) throws -> Data {
+        try transcriptionSessionUpdateData(
+            languages: [language],
+            modelID: modelID,
+            audioInputSource: audioInputSource
+        )
+    }
+
+    static func transcriptionSessionUpdateData(
+        languages: [LanguageOption],
+        modelID: String,
+        audioInputSource: AudioInputSource
+    ) throws -> Data {
+        let languageCodes = languages.reduce(into: [String]()) { codes, language in
+            let code = language.openAILanguageCode
+            if !codes.contains(code) {
+                codes.append(code)
+            }
+        }
         let event = OpenAIRealtimeTranscriptionSessionUpdateEvent(
             session: OpenAIRealtimeTranscriptionSession(
                 type: "transcription",
@@ -492,11 +760,43 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                         format: OpenAIRealtimeAudioFormat(type: "audio/pcm", rate: Self.realtimeAudioSampleRate),
                         transcription: OpenAIRealtimeTranscriptionConfig(
                             model: modelID,
-                            languages: [language.openAILanguageCode],
-                            delay: "low"
+                            languages: languageCodes,
+                            delay: "high"
                         ),
-                        turnDetection: .lowLatencyServerVAD,
-                        noiseReduction: OpenAIRealtimeNoiseReduction(type: "near_field")
+                        noiseReduction: audioInputSource == .systemAudio
+                            ? nil
+                            : OpenAIRealtimeNoiseReduction(type: "far_field")
+                    )
+                )
+            )
+        )
+        return try JSONEncoder().encode(event)
+    }
+
+    static let transcriptionWebSocketURL = URL(
+        string: "wss://api.openai.com/v1/realtime?intent=transcription"
+    )!
+
+    static func transcriptionAudioCommitData() throws -> Data {
+        try JSONEncoder().encode(OpenAIRealtimeAudioCommitEvent())
+    }
+
+    static func translationSessionUpdateData(
+        language: LanguageOption,
+        audioInputSource: AudioInputSource = .microphone
+    ) throws -> Data {
+        let event = OpenAIRealtimeTranslationSessionUpdateEvent(
+            session: OpenAIRealtimeTranslationSession(
+                audio: OpenAIRealtimeTranslationAudio(
+                    input: OpenAIRealtimeTranslationAudioInput(
+                        transcription: OpenAIRealtimeTranslationInputTranscription(
+                            model: OpenAIRealtimeTranscriptionModel.gptRealtimeWhisper.rawValue
+                        ),
+                        // Both filters suppressed the low-level meeting sample; preserve source audio.
+                        noiseReduction: nil
+                    ),
+                    output: OpenAIRealtimeTranslationAudioOutput(
+                        language: language.openAILanguageCode
                     )
                 )
             )
@@ -539,10 +839,14 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             }
             do {
                 let message = try await webSocketTask.receive()
-                guard case let .string(text) = message else { continue }
+                guard case let .string(text) = message else {
+                    logTranslationMilestone(.binaryFrameIgnored, generation: generation)
+                    continue
+                }
                 handleEventText(text, generation: generation)
             } catch {
                 guard !Task.isCancelled else { return }
+                logTranslationMilestone(.receiveFailed, generation: generation)
                 publishFailureIfCurrent(
                     Self.publicConnectionError(from: error),
                     generation: generation
@@ -563,7 +867,10 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         guard isCurrentGeneration(generation) else { return }
         guard let data = text.data(using: .utf8),
               let event = try? JSONDecoder().decode(OpenAIRealtimeTranscriptionEvent.self, from: data)
-        else { return }
+        else {
+            logTranslationMilestone(.invalidJSON, generation: generation)
+            return
+        }
 
         stateLock.lock()
         guard connectionGeneration == generation else {
@@ -583,9 +890,14 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         #endif
 
         switch event.type {
+        case "session.created":
+            logTranslationMilestone(.sessionCreated, generation: generation)
+        case "session.updated":
+            logTranslationMilestone(.sessionUpdated, generation: generation)
         case "input_audio_buffer.committed",
             "session.input_audio_buffer.committed":
             guard let itemID = event.itemID, !itemID.isEmpty else { return }
+            acknowledgeTranscriptionCommit(itemID: itemID, generation: generation)
             registerRealtimeTimelineItem(
                 id: itemID,
                 previousItemID: event.previousItemID,
@@ -613,6 +925,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                     generation: generation
                 )
             case .translationOnly:
+                logTranslationMilestone(.sourceTranscript, generation: generation)
                 appendRealtimeTranslationInputDelta(
                     delta,
                     generation: generation
@@ -631,6 +944,7 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                     finalText: transcript,
                     generation: generation
                 )
+                completeTranscriptionCommit(itemID: event.itemID, generation: generation)
             case .translationOnly:
                 realtimeTranslationInputPublishThrottle.finish(finalText: transcript) { [weak self] text in
                     self?.publishRealtimeTranslationInputTranscript(
@@ -645,10 +959,12 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
                 itemID: event.itemID,
                 generation: generation
             )
+            completeTranscriptionCommit(itemID: event.itemID, generation: generation)
         case "session.output_transcript.delta":
             guard outputMode == .translationOnly,
                   let delta = event.delta,
                   !delta.isEmpty else { return }
+            logTranslationMilestone(.translatedTranscript, generation: generation)
             appendRealtimeTranslationOutputDelta(
                 delta,
                 generation: generation
@@ -666,8 +982,16 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             guard outputMode == .translationOnly,
                   let delta = event.delta,
                   !delta.isEmpty else { return }
+            logTranslationMilestone(.outputAudio, generation: generation)
             publishOutputAudioIfCurrent(delta, generation: generation)
         case "error":
+            logTranslationMilestone(.serverError, generation: generation)
+            if outputMode == .transcription,
+               Self.isRecoverableTranscriptionCommitError(event.error) {
+                clearOutstandingTranscriptionCommitWaits(generation: generation)
+                return
+            }
+            failOutstandingTranscriptionCommits(generation: generation)
             publishFailureIfCurrent(
                 OpenAIRealtimeTranscriberError.connectionFailed,
                 generation: generation
@@ -675,6 +999,16 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         default:
             return
         }
+    }
+
+    // Bounded to one entry per milestone per connection. Never log audio, text, keys, or server payloads.
+    private func logTranslationMilestone(_ milestone: TranslationMilestone, generation: UInt64) {
+        let shouldLog = stateLock.withLock {
+            connectionGeneration == generation && outputMode == .translationOnly
+                && loggedTranslationMilestones.insert(milestone).inserted
+        }
+        guard shouldLog else { return }
+        Self.logger.notice("translation generation=\(generation) milestone=\(milestone.rawValue, privacy: .public)")
     }
 
     nonisolated static func publicConnectionError(from error: Error) -> Error {
@@ -685,6 +1019,17 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
             return error
         }
         return OpenAIRealtimeTranscriberError.connectionFailed
+    }
+
+    private static func isRecoverableTranscriptionCommitError(
+        _ error: OpenAIRealtimeErrorBody?
+    ) -> Bool {
+        error?.code == "input_audio_buffer_commit_empty"
+            || error?.type == "input_audio_buffer_commit_empty"
+    }
+
+    static func hasMinimumTranscriptionCommitAudio(_ byteCount: Int) -> Bool {
+        byteCount >= minimumTranscriptionCommitAudioByteCount
     }
 
     private func appendRealtimeTranscriptionDelta(
@@ -1342,6 +1687,12 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         self.receiveTask = nil
         self.webSocketTask = nil
         pendingAudioSendCount = 0
+        hasUncommittedTranscriptionAudio = false
+        uncommittedTranscriptionAudioByteCount = 0
+        isTranscriptionCommitPending = false
+        transcriptionCommitIDsAwaitingAcknowledgement.removeAll()
+        transcriptionCommitIDByItemID.removeAll()
+        outstandingTranscriptionCommitIDs.removeAll()
         resetRealtimeTranscriptBuffers()
         stateLock.unlock()
         receiveTask?.cancel()
@@ -1369,6 +1720,52 @@ final class OpenAIRealtimeTranscriber: @unchecked Sendable {
         defer { stateLock.unlock() }
         return connectionGeneration
     }
+
+    #if DEBUG
+    func prepareRealtimeTranslationForTesting() {
+        stop()
+        stateLock.withLock { outputMode = .translationOnly }
+    }
+
+    var isTranscriptionCommitPendingForTesting: Bool {
+        stateLock.withLock { isTranscriptionCommitPending }
+    }
+
+    var outstandingTranscriptionCommitCountForTesting: Int {
+        stateLock.withLock { outstandingTranscriptionCommitIDs.count }
+    }
+
+    var uncommittedTranscriptionAudioByteCountForTesting: Int {
+        stateLock.withLock { uncommittedTranscriptionAudioByteCount }
+    }
+
+    var onFinishPendingTranscriptionAudioForTesting: (@Sendable () async -> Bool)? {
+        get { stateLock.withLock { finishPendingTranscriptionAudioHook } }
+        set { stateLock.withLock { finishPendingTranscriptionAudioHook = newValue } }
+    }
+
+    func prepareTranscriptionFinalizationForTesting(pendingSendCount: Int) {
+        let task = URLSession.shared.webSocketTask(
+            with: URL(string: "wss://localhost.invalid/realtime")!
+        )
+        stateLock.withLock {
+            webSocketTask = task
+            pendingAudioSendCount = max(0, pendingSendCount)
+        }
+    }
+
+    func finishPendingTranscriptionAudioForTesting(phaseTimeout: TimeInterval) async -> Bool {
+        await finishPendingTranscriptionAudio(phaseTimeout: phaseTimeout)
+    }
+
+    func seedOutstandingTranscriptionCommitForTesting() {
+        stateLock.withLock {
+            nextTranscriptionCommitID &+= 1
+            transcriptionCommitIDsAwaitingAcknowledgement.append(nextTranscriptionCommitID)
+            outstandingTranscriptionCommitIDs.insert(nextTranscriptionCommitID)
+        }
+    }
+    #endif
 
     @discardableResult
     private func resetRealtimeTranscriptBuffers(
@@ -1591,6 +1988,12 @@ private struct OpenAIRealtimeTranscriptionSessionUpdateEvent: Encodable {
     let session: OpenAIRealtimeTranscriptionSession
 }
 
+private struct TranscriptionCommitRequest {
+    let id: UInt64
+    let webSocketTask: URLSessionWebSocketTask
+    let generation: UInt64
+}
+
 private struct OpenAIRealtimeTranslationSessionUpdateEvent: Encodable {
     let type = "session.update"
     let session: OpenAIRealtimeTranslationSession
@@ -1608,14 +2011,25 @@ private struct OpenAIRealtimeTranscriptionAudio: Encodable {
 private struct OpenAIRealtimeTranscriptionAudioInput: Encodable {
     let format: OpenAIRealtimeAudioFormat
     let transcription: OpenAIRealtimeTranscriptionConfig
-    let turnDetection: OpenAIRealtimeTurnDetection
-    let noiseReduction: OpenAIRealtimeNoiseReduction
+    let noiseReduction: OpenAIRealtimeNoiseReduction?
 
     private enum CodingKeys: String, CodingKey {
         case format
         case transcription
         case turnDetection = "turn_detection"
         case noiseReduction = "noise_reduction"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(format, forKey: .format)
+        try container.encode(transcription, forKey: .transcription)
+        try container.encodeNil(forKey: .turnDetection)
+        if let noiseReduction {
+            try container.encode(noiseReduction, forKey: .noiseReduction)
+        } else {
+            try container.encodeNil(forKey: .noiseReduction)
+        }
     }
 }
 
@@ -1634,16 +2048,23 @@ private struct OpenAIRealtimeTranslationAudio: Encodable {
 }
 
 private struct OpenAIRealtimeTranslationAudioInput: Encodable {
-    let format: OpenAIRealtimeAudioFormat
     let transcription: OpenAIRealtimeTranslationInputTranscription
-    let turnDetection: OpenAIRealtimeTurnDetection
-    let noiseReduction: OpenAIRealtimeNoiseReduction
+    let noiseReduction: OpenAIRealtimeNoiseReduction?
 
     private enum CodingKeys: String, CodingKey {
-        case format
         case transcription
-        case turnDetection = "turn_detection"
         case noiseReduction = "noise_reduction"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(transcription, forKey: .transcription)
+        // Omitting the field leaves a provider default unchanged; null explicitly disables it.
+        if let noiseReduction {
+            try container.encode(noiseReduction, forKey: .noiseReduction)
+        } else {
+            try container.encodeNil(forKey: .noiseReduction)
+        }
     }
 }
 
@@ -1661,39 +2082,6 @@ private struct OpenAIRealtimeTranscriptionConfig: Encodable {
     let delay: String
 }
 
-private struct OpenAIRealtimeTurnDetection: Encodable {
-    let type: String
-    let threshold: Double?
-    let prefixPaddingMilliseconds: Int?
-    let silenceDurationMilliseconds: Int?
-
-    static let lowLatencyServerVAD = OpenAIRealtimeTurnDetection(
-        type: "server_vad",
-        threshold: 0.42,
-        prefixPaddingMilliseconds: 120,
-        silenceDurationMilliseconds: 220
-    )
-
-    init(
-        type: String,
-        threshold: Double? = nil,
-        prefixPaddingMilliseconds: Int? = nil,
-        silenceDurationMilliseconds: Int? = nil
-    ) {
-        self.type = type
-        self.threshold = threshold
-        self.prefixPaddingMilliseconds = prefixPaddingMilliseconds
-        self.silenceDurationMilliseconds = silenceDurationMilliseconds
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case type
-        case threshold
-        case prefixPaddingMilliseconds = "prefix_padding_ms"
-        case silenceDurationMilliseconds = "silence_duration_ms"
-    }
-}
-
 private struct OpenAIRealtimeNoiseReduction: Encodable {
     let type: String
 }
@@ -1701,6 +2089,10 @@ private struct OpenAIRealtimeNoiseReduction: Encodable {
 private struct OpenAIRealtimeAudioAppendEvent: Encodable {
     let type: String
     let audio: String
+}
+
+private struct OpenAIRealtimeAudioCommitEvent: Encodable {
+    let type = "input_audio_buffer.commit"
 }
 
 private struct OpenAIRealtimeTranscriptionEvent: Decodable {
@@ -1738,6 +2130,8 @@ private struct OpenAIRealtimeConversationContent: Decodable {
 }
 
 private struct OpenAIRealtimeErrorBody: Decodable {
+    let code: String?
+    let type: String?
     let message: String?
 }
 

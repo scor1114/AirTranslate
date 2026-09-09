@@ -745,7 +745,7 @@ private struct SessionOverviewCard: View {
             Spacer(minLength: 12)
 
             Group {
-                if isRunning {
+                if isRunning, !session.isStopping {
                     HeaderAudioLevelStrip(
                         session: session,
                         isPaused: isPaused
@@ -753,7 +753,7 @@ private struct SessionOverviewCard: View {
                 } else {
                     HeaderStatusMessage(
                         statusMessage: statusMessage,
-                        isStarting: isStarting,
+                        isStarting: isStarting || session.isStopping,
                         isBlocked: isBlocked
                     )
                 }

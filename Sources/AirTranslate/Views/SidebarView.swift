@@ -177,6 +177,7 @@ struct ConsoleBarView: View {
             }
 
             Spacer(minLength: 0)
+            sessionOptionsMenu
             engineButton
         }
         .padding(.horizontal, AirTranslateDesign.Spacing.sm)
@@ -529,6 +530,26 @@ struct ConsoleBarView: View {
         .accessibilityLabel(AppText.moreControls)
     }
 
+    private var sessionOptionsMenu: some View {
+        Menu {
+            Toggle(AppText.saveAudioRecording, isOn: guardedBinding($session.isAudioRecordingEnabled))
+                .help(AppText.saveAudioRecordingHelp)
+            if showsMixedLanguageInterpreterInput {
+                Toggle(mixedLanguageInterpreterInputTitle, isOn: guardedBinding($session.isMixedLanguageInterpreterInputEnabled))
+                    .help(mixedLanguageInterpreterInputHelp)
+            }
+        } label: {
+            Image(systemName: session.isAudioRecordingEnabled ? "record.circle.fill" : "record.circle")
+                .foregroundStyle(session.isAudioRecordingEnabled ? AirTranslateDesign.Palette.danger : AirTranslateDesign.Palette.textSecondary)
+        }
+        .menuIndicator(.hidden)
+        .airFocusRing(cornerRadius: AirTranslateDesign.Radius.control)
+        .disabled(!isConfigurationAvailable)
+        .help(AppText.audioRecording)
+        .accessibilityLabel(AppText.audioRecording)
+        .accessibilityValue(session.isAudioRecordingEnabled ? AppText.floatingCaptionPowerOn : AppText.floatingCaptionPowerOff)
+    }
+
     private var engineButton: some View {
         Button {
             openSettings()
@@ -601,6 +622,7 @@ struct ConsoleBarView: View {
     }
 
     private var captureStateDescription: String {
+        if session.isStopping { return AppText.stopping }
         if session.isStarting { return session.statusMessage }
         if session.isPaused { return AppText.paused }
         if session.isRunning { return AppText.listening }
@@ -672,6 +694,29 @@ struct ConsoleBarView: View {
             || session.isUsingMetaScribe
     }
 
+    private var showsMixedLanguageInterpreterInput: Bool {
+        ProcessingEngine.current(for: session) == .gpt
+            && session.openAITranslationModel.usesRealtimeAudioTranslation
+    }
+
+    private var mixedLanguageInterpreterInputTitle: String {
+        AppText.localized(
+            english: "Interpreter / mixed input",
+            korean: "통역 포함 혼합 입력",
+            japanese: "通訳を含む混合入力",
+            chineseSimplified: "含口译的混合输入"
+        )
+    }
+
+    private var mixedLanguageInterpreterInputHelp: String {
+        AppText.localized(
+            english: "GPT transcribes both selected languages. Apple translates source-language speech; confidently detected target-only sentences are omitted. Captions appear after each utterance is finalized, so continuous speech may delay updates.",
+            korean: "GPT가 선택한 두 언어를 전사하고 Apple이 원문 언어 발화를 번역합니다. 대상 언어만으로 된 것으로 명확히 판별된 문장은 제외합니다. 발화 구간이 확정된 뒤 표시되므로 쉬지 않고 말하면 자막이 늦어질 수 있습니다.",
+            japanese: "GPTが選択した2言語を文字起こしし、Appleが原文言語の発話を翻訳します。対象言語だけと明確に判定された文は除外します。発話区間の確定後に表示されるため、連続した発話では字幕が遅れることがあります。",
+            chineseSimplified: "GPT 会转写所选的两种语言，Apple 会翻译源语言发言，并省略被明确识别为仅含目标语言的句子。字幕会在每段发言确定后显示，因此连续讲话时可能会延迟更新。"
+        )
+    }
+
     private var usesAPIModeOutputControl: Bool {
         ProcessingEngine.current(for: session) != .apple
     }
@@ -700,12 +745,14 @@ private struct SessionStatusPill: View {
     }
 
     private var title: String {
+        if session.isStopping { return AppText.stopping }
         if session.isPaused { return AppText.paused }
         if session.isRunning { return AppText.listening }
         return session.statusMessage
     }
 
     private var symbolName: String {
+        if session.isStopping { return "stop.circle.fill" }
         if session.isPaused { return "pause.circle.fill" }
         if session.isRunning { return "waveform.circle.fill" }
         if session.statusMessage == AppText.ready { return "checkmark.circle.fill" }

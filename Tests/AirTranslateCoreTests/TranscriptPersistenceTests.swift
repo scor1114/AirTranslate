@@ -42,7 +42,7 @@ struct TranscriptPersistenceTests {
         defer { cleanup(directory: directory, defaults: defaults, suiteName: suiteName) }
 
         await deliverTranscript("Quit must not persist this text.", to: session)
-        session.prepareForTermination()
+        await session.prepareForTermination()
 
         #expect(session.lines.last?.sourceText == "Quit must not persist this text.")
         #expect(transcriptFiles(in: directory).isEmpty)
@@ -64,8 +64,45 @@ struct TranscriptPersistenceTests {
         #expect(savedText.contains("Opt-in persistence writes this text."))
     }
 
+    @Test(arguments: [false, true])
     @MainActor
-    private func makeSession() throws -> (
+    func audioRecordingSurvivesStopAndQuitIndependentlyOfTextPersistence(persistText: Bool) async throws {
+        for stopBeforeQuit in [false, true] {
+            let registry = AudioSamplePipelineRegistry()
+            let (session, directory, defaults, suiteName) = try makeSession(registry: registry)
+            defer { cleanup(directory: directory, defaults: defaults, suiteName: suiteName) }
+            #expect(session.isAudioRecordingEnabled)
+            session.isTranscriptPersistenceEnabled = persistText
+            await deliverTranscript("Recording and text have separate save choices.", to: session)
+
+            let writer = AudioRecordingWriter(directoryURL: directory, inputSource: .microphone)
+            try writer.appendPCM16(Data(count: 32_000), sampleRate: 16_000)
+            registry.publish(
+                generation: 1,
+                transcriber: LiveSpeechTranscriber(),
+                openAITranscriber: OpenAIRealtimeTranscriber(),
+                geminiLiveTranslator: GeminiLiveTranslationService(),
+                metaVoiceTranscriber: MetaVoiceTranscribeService(),
+                azureMAITranscriber: AzureMAITranscriber(),
+                recordingWriter: writer,
+                recordingFailure: { _ in }
+            )
+            if stopBeforeQuit { session.stop() }
+            await session.prepareForTermination()
+
+            #expect(transcriptFiles(in: directory).isEmpty == !persistText)
+            let recording = try #require(session.savedTranscripts.first)
+            #expect(session.savedTranscripts.count == 1)
+            #expect(recording.isAudioOnly == !persistText)
+            let recordingName = try #require(recording.recordingFileName)
+            let recordingURL = directory.appendingPathComponent(recordingName)
+            #expect((try recordingURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) > 0)
+            #expect(registry.currentRecordingFileURL() == nil)
+        }
+    }
+
+    @MainActor
+    private func makeSession(registry: AudioSamplePipelineRegistry = AudioSamplePipelineRegistry()) throws -> (
         TranslationSessionStore,
         URL,
         UserDefaults,
@@ -80,7 +117,8 @@ struct TranscriptPersistenceTests {
         let session = TranslationSessionStore(
             modelAvailabilityProvider: { _, _ in [:] },
             settingsDefaults: defaults,
-            transcriptsDirectoryURL: directory
+            transcriptsDirectoryURL: directory,
+            audioSamplePipelineRegistry: registry
         )
         session.useTranscribeOnlyMode()
         session.sourceLanguage = .english

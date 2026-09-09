@@ -4,6 +4,12 @@ All notable changes to AirTranslate are documented in this file.
 
 ## [Unreleased]
 
+### Fork build 180.1 (2026-09-10)
+
+- Reapplies the existing fork's GPT session schema, transcription commit/stop/pause, and translation-segment fixes to upstream 1.8.0.
+- Restores default-on audio recording with bounded encoding, active-file protection, and shutdown finalization, independently of upstream's default-off text persistence.
+- Restores default-off, session-only mixed-language input in the new console. See [FORK.md](FORK.md) for source comparisons, inherited limitations, and validation.
+
 ## 1.8.0 - 2026-09-08
 
 ### Added

@@ -141,6 +141,18 @@ enum AppText {
     )
     static let ready = localized(english: "Ready", korean: "준비됨", japanese: "準備完了", chineseSimplified: "就绪")
     static let stopped = localized(english: "Stopped", korean: "중지됨", japanese: "停止中", chineseSimplified: "已停止")
+    static let stopping = localized(
+        english: "Stopping… Press Stop again to finish immediately.",
+        korean: "정지 중… 즉시 종료하려면 중지를 한 번 더 누르세요.",
+        japanese: "停止中…すぐに終了するには、もう一度停止を押してください。",
+        chineseSimplified: "正在停止…再次按停止可立即结束。"
+    )
+    static let gptTranscriptionFinalizationTimedOut = localized(
+        english: "GPT transcription stopped before finalization completed. The last utterance may be missing.",
+        korean: "GPT 전사 마무리가 완료되기 전에 정지되었습니다. 마지막 발화가 누락되었을 수 있습니다.",
+        japanese: "GPT文字起こしの完了前に停止しました。最後の発話が欠けている可能性があります。",
+        chineseSimplified: "GPT 转写在完成收尾前已停止，最后一段发言可能缺失。"
+    )
     static let paused = localized(english: "Paused", korean: "일시정지됨", japanese: "一時停止中", chineseSimplified: "已暂停")
     static let capture = localized(english: "Capture", korean: "캡처", japanese: "キャプチャ", chineseSimplified: "捕获")
     static let start = localized(english: "Start", korean: "시작", japanese: "開始", chineseSimplified: "开始")
@@ -191,6 +203,24 @@ enum AppText {
         korean: "오디오 입력",
         japanese: "オーディオ入力",
         chineseSimplified: "音频输入"
+    )
+    static let audioRecording = localized(
+        english: "Recording",
+        korean: "녹음",
+        japanese: "録音",
+        chineseSimplified: "录音"
+    )
+    static let saveAudioRecording = localized(
+        english: "Save audio file",
+        korean: "녹음 파일 저장",
+        japanese: "録音ファイルを保存",
+        chineseSimplified: "保存录音文件"
+    )
+    static let saveAudioRecordingHelp = localized(
+        english: "Save captured audio as a compressed .m4a file beside the transcript files.",
+        korean: "캡처한 오디오를 기록 파일과 같은 폴더에 압축된 .m4a 파일로 저장합니다.",
+        japanese: "キャプチャした音声を記録ファイルと同じフォルダに圧縮 .m4a ファイルとして保存します。",
+        chineseSimplified: "将捕获的音频以压缩的 .m4a 文件保存到记录文件所在的文件夹。"
     )
     static let systemAudioInput = localized(
         english: "Mac Audio",
@@ -837,17 +867,25 @@ enum AppText {
         english: "Select a saved transcript.",
         korean: "저장된 기록을 선택하세요."
     )
+    static let audioOnlyRecording = localized(
+        english: "Audio recording",
+        korean: "녹음 파일"
+    )
+    static let audioOnlyRecordingDescription = localized(
+        english: "No transcript text was saved for this recording. Open the save folder to play or manage the .m4a file.",
+        korean: "이 녹음에는 저장된 전사 텍스트가 없습니다. 저장 폴더에서 .m4a 파일을 재생하거나 관리할 수 있습니다."
+    )
     static let deleteAllSavedTranscripts = localized(
         english: "Delete All",
         korean: "모두 지우기"
     )
     static let deleteAllSavedTranscriptsConfirmation = localized(
-        english: "Delete all saved transcript files? This cannot be undone.",
-        korean: "저장된 기록 파일을 모두 지울까요? 이 작업은 되돌릴 수 없습니다."
+        english: "Delete all saved transcript and audio recording files? This cannot be undone.",
+        korean: "저장된 기록과 녹음 파일을 모두 지울까요? 이 작업은 되돌릴 수 없습니다."
     )
     static let deleteAllSavedTranscriptsHelp = localized(
-        english: "Delete every saved transcript file.",
-        korean: "저장된 모든 기록 파일을 삭제합니다."
+        english: "Delete every saved transcript and audio recording file.",
+        korean: "저장된 모든 기록과 녹음 파일을 삭제합니다."
     )
     static let editSaved = localized(english: "Edit Saved", korean: "저장본 편집")
     static let title = localized(english: "Title", korean: "제목")
@@ -859,10 +897,16 @@ enum AppText {
     static let transcriptText = localized(english: "Transcript Text", korean: "기록 텍스트")
     static let deleteSavedTranscript = localized(english: "Delete Transcript", korean: "기록 삭제")
     static let deleteSavedTranscriptConfirmation = localized(
-        english: "Delete this saved transcript? This cannot be undone.",
-        korean: "이 저장 기록을 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
-        japanese: "この保存済み文字起こしを削除しますか？この操作は取り消せません。",
-        chineseSimplified: "要删除这份已保存的转写记录吗？此操作无法撤销。"
+        english: "Delete this saved transcript and its audio recording? This cannot be undone.",
+        korean: "이 저장 기록과 녹음 파일을 함께 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
+        japanese: "この保存済み文字起こしと音声録音を削除しますか？この操作は取り消せません。",
+        chineseSimplified: "要删除这份已保存的转写记录及其录音吗？此操作无法撤销。"
+    )
+    static let activeRecordingCannotBeDeleted = localized(
+        english: "This recording is still in progress and cannot be deleted.",
+        korean: "현재 녹음 중인 파일은 삭제할 수 없습니다.",
+        japanese: "現在録音中のファイルは削除できません。",
+        chineseSimplified: "当前正在录音，无法删除此文件。"
     )
     static let translation = localized(english: "Translation", korean: "번역")
     static let translationDescription = localized(
@@ -881,6 +925,24 @@ enum AppText {
         english: "Transcript saved",
         korean: "기록이 저장되었습니다"
     )
+    static func audioRecordingFailed(_ message: String) -> String {
+        localized(
+            english: "Audio recording failed, but capture continues: \(message)",
+            korean: "오디오 녹음에 실패했지만 캡처는 계속됩니다: \(message)"
+        )
+    }
+    static func audioRecordingSavedSeparately(_ fileName: String) -> String {
+        localized(
+            english: "The recording was saved separately as \(fileName).",
+            korean: "녹음 파일이 \(fileName)(으)로 별도 저장되었습니다."
+        )
+    }
+    static func audioRecordingDroppedChunks(_ count: Int) -> String {
+        localized(
+            english: "The audio encoder fell behind, so \(count) recording chunks were omitted.",
+            korean: "오디오 인코더가 입력을 따라가지 못해 녹음 구간 \(count)개가 누락되었습니다."
+        )
+    }
     static let copy = localized(english: "Copy", korean: "복사")
     static let copied = localized(english: "Copied", korean: "복사됨")
     static let appleIntelligenceWritingTools = localized(

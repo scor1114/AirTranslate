@@ -89,6 +89,7 @@ private enum SettingsKey {
     static let sessionDurationMode = "sessionDurationMode"
     static let audioInputSource = "audioInputSource"
     static let selectedMicrophoneInputDeviceID = "selectedMicrophoneInputDeviceID"
+    static let isAudioRecordingEnabled = "isAudioRecordingEnabled"
     static let isAppleSourceAutoDetectionEnabled = "isAppleSourceAutoDetectionEnabled"
 }
 
@@ -133,6 +134,7 @@ struct StartConfiguration: Equatable {
     let azureSpeechEndpoint: String
     let usesMetaSpeakerLabels: Bool
     let usesAppleSourceAutoDetection: Bool
+    let usesMixedLanguageInterpreterInput: Bool
 
     init(
         audioInputSource: AudioInputSource,
@@ -147,7 +149,8 @@ struct StartConfiguration: Equatable {
         azureMAIEnabled: Bool = false,
         azureSpeechEndpoint: String = "",
         usesMetaSpeakerLabels: Bool = true,
-        usesAppleSourceAutoDetection: Bool
+        usesAppleSourceAutoDetection: Bool,
+        usesMixedLanguageInterpreterInput: Bool = false
     ) {
         self.audioInputSource = audioInputSource
         self.microphoneDeviceUniqueID = microphoneDeviceUniqueID
@@ -162,6 +165,7 @@ struct StartConfiguration: Equatable {
         self.azureSpeechEndpoint = azureSpeechEndpoint
         self.usesMetaSpeakerLabels = usesMetaSpeakerLabels
         self.usesAppleSourceAutoDetection = usesAppleSourceAutoDetection
+        self.usesMixedLanguageInterpreterInput = usesMixedLanguageInterpreterInput
     }
 
     var isUsingGPTTranscriptionMode: Bool {
@@ -174,12 +178,54 @@ struct StartConfiguration: Equatable {
             || geminiTranslationModel.isTranscription
     }
 
+    var usesGPTTranscriptionPipeline: Bool {
+        isUsingGPTTranscriptionMode || usesMixedLanguageInterpreterInput
+    }
+
     var sampleRate: Int {
         openAITranscriptionModel.isEnabled
             || openAITranslationModel.usesRealtimeAudioTranslation
             || metaTranscriptionModel.isEnabled
             ? 24_000
             : 16_000
+    }
+}
+
+struct RealtimeTranscriptionTurnBoundary {
+    private static let silenceThreshold: Float = -50
+    private static let requiredSilenceDuration: TimeInterval = 0.6
+    private static let maximumDuration: TimeInterval = 20
+    private var startedAt: Date?
+    private var silenceStartedAt: Date?
+
+    mutating func observe(level: Float?, now: Date = Date()) -> Bool {
+        guard let level else { return false }
+        if level >= Self.silenceThreshold {
+            silenceStartedAt = nil
+            if startedAt == nil {
+                startedAt = now
+            }
+            guard let startedAt,
+                  now.timeIntervalSince(startedAt) >= Self.maximumDuration
+            else { return false }
+        } else {
+            guard startedAt != nil else { return false }
+            guard let silenceStartedAt else {
+                self.silenceStartedAt = now
+                return false
+            }
+            guard now.timeIntervalSince(silenceStartedAt) >= Self.requiredSilenceDuration else {
+                return false
+            }
+        }
+
+        reset()
+        return true
+    }
+
+    mutating func reset() {
+        startedAt = nil
+        silenceStartedAt = nil
     }
 }
 
@@ -295,18 +341,69 @@ private struct RealtimeAudioTransportError: LocalizedError {
     }
 }
 
-private final class AudioSamplePipelineRegistry: @unchecked Sendable {
-    private struct Pipeline {
+private final class SendableAudioSampleBuffer: @unchecked Sendable {
+    let sampleBuffer: CMSampleBuffer
+
+    init(_ sampleBuffer: CMSampleBuffer) {
+        self.sampleBuffer = sampleBuffer
+    }
+}
+
+struct AudioRecordingQueueDegradation: Equatable, Sendable {
+    let droppedChunkCount: Int
+    let droppedByteCount: Int
+    let pendingAppendLimit: Int
+}
+
+struct AudioRecordingFinalization: Sendable {
+    let fileURL: URL?
+    let degradation: AudioRecordingQueueDegradation?
+}
+
+final class AudioSamplePipelineRegistry: @unchecked Sendable {
+    static let maximumPendingRecordingAppendCount = 32
+
+    private final class Pipeline: @unchecked Sendable {
         let generation: UInt64
         let transcriber: LiveSpeechTranscriber
         let openAITranscriber: OpenAIRealtimeTranscriber
         let geminiLiveTranslator: GeminiLiveTranslationService
         let azureMAITranscriber: AzureMAITranscriber
         let metaVoiceTranscriber: MetaVoiceTranscribeService
+        let recordingWriter: AudioRecordingWriter?
+        let recordingQueue: DispatchQueue?
+        let recordingFailure: @Sendable (Error) -> Void
+        var pendingRecordingAppendCount = 0
+        var droppedAudioChunkCount = 0
+        var droppedAudioByteCount = 0
+
+        init(
+            generation: UInt64,
+            transcriber: LiveSpeechTranscriber,
+            openAITranscriber: OpenAIRealtimeTranscriber,
+            geminiLiveTranslator: GeminiLiveTranslationService,
+            azureMAITranscriber: AzureMAITranscriber,
+            metaVoiceTranscriber: MetaVoiceTranscribeService,
+            recordingWriter: AudioRecordingWriter?,
+            recordingQueue: DispatchQueue?,
+            recordingFailure: @escaping @Sendable (Error) -> Void
+        ) {
+            self.generation = generation
+            self.transcriber = transcriber
+            self.openAITranscriber = openAITranscriber
+            self.geminiLiveTranslator = geminiLiveTranslator
+            self.azureMAITranscriber = azureMAITranscriber
+            self.metaVoiceTranscriber = metaVoiceTranscriber
+            self.recordingWriter = recordingWriter
+            self.recordingQueue = recordingQueue
+            self.recordingFailure = recordingFailure
+        }
     }
 
     private let lock = NSLock()
     private var pipeline: Pipeline?
+    private var activeRecordingFileURL: URL?
+    private var activeRecordingGeneration: UInt64?
 
     func publish(
         generation: UInt64,
@@ -314,38 +411,163 @@ private final class AudioSamplePipelineRegistry: @unchecked Sendable {
         openAITranscriber: OpenAIRealtimeTranscriber,
         geminiLiveTranslator: GeminiLiveTranslationService,
         metaVoiceTranscriber: MetaVoiceTranscribeService,
-        azureMAITranscriber: AzureMAITranscriber
+        azureMAITranscriber: AzureMAITranscriber,
+        recordingWriter: AudioRecordingWriter?,
+        recordingFailure: @escaping @Sendable (Error) -> Void
     ) {
         lock.lock()
+        recordingWriter?.didOpenFile = { [weak self] fileURL in
+            self?.recordingDidOpen(fileURL, generation: generation)
+        }
+        activeRecordingFileURL = recordingWriter?.fileURL
+        activeRecordingGeneration = recordingWriter == nil ? nil : generation
         pipeline = Pipeline(
             generation: generation,
             transcriber: transcriber,
             openAITranscriber: openAITranscriber,
             geminiLiveTranslator: geminiLiveTranslator,
             azureMAITranscriber: azureMAITranscriber,
-            metaVoiceTranscriber: metaVoiceTranscriber
+            metaVoiceTranscriber: metaVoiceTranscriber,
+            recordingWriter: recordingWriter,
+            recordingQueue: recordingWriter == nil
+                ? nil
+                : DispatchQueue(label: "dev.appcaster.AirTranslate.audio-recording.\(generation)"),
+            recordingFailure: recordingFailure
         )
         lock.unlock()
     }
 
-    func clear() {
+    @discardableResult
+    func beginClear() -> Task<AudioRecordingFinalization, Never> {
         lock.lock()
-        pipeline = nil
+        let retiredPipeline = pipeline
+        self.pipeline = nil
+        lock.unlock()
+        guard let retiredPipeline else {
+            return Task { AudioRecordingFinalization(fileURL: nil, degradation: nil) }
+        }
+        guard let recordingWriter = retiredPipeline.recordingWriter,
+              let recordingQueue = retiredPipeline.recordingQueue
+        else {
+            clearActiveRecording(generation: retiredPipeline.generation)
+            return Task { AudioRecordingFinalization(fileURL: nil, degradation: nil) }
+        }
+
+        return Task {
+            await withCheckedContinuation { continuation in
+                recordingQueue.async { [self] in
+                    let fileURL = recordingWriter.finish()
+                    clearActiveRecording(generation: retiredPipeline.generation)
+                    continuation.resume(
+                        returning: AudioRecordingFinalization(
+                            fileURL: fileURL,
+                            degradation: recordingQueueDegradation(for: retiredPipeline)
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    func currentRecordingFileURL() -> URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeRecordingFileURL
+    }
+
+    private func recordingDidOpen(_ fileURL: URL, generation: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard pipeline?.generation == generation else { return }
+        activeRecordingFileURL = fileURL
+        activeRecordingGeneration = generation
+    }
+
+    private func clearActiveRecording(generation: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard activeRecordingGeneration == generation else { return }
+        activeRecordingFileURL = nil
+        activeRecordingGeneration = nil
+    }
+
+    func setRecordingPaused(_ isPaused: Bool) {
+        lock.lock()
+        guard let pipeline,
+              let recordingWriter = pipeline.recordingWriter,
+              let recordingQueue = pipeline.recordingQueue
+        else {
+            lock.unlock()
+            return
+        }
+        recordingQueue.async {
+            recordingWriter.isPaused = isPaused
+        }
         lock.unlock()
     }
 
     func append(_ sampleBuffer: CMSampleBuffer, generation: UInt64) {
         lock.lock()
-        defer { lock.unlock() }
-        guard let pipeline, pipeline.generation == generation else { return }
+        guard let pipeline, pipeline.generation == generation else {
+            lock.unlock()
+            return
+        }
 
-        // clear() waits for any in-flight append to finish before the MainActor
-        // stops or replaces these backends.
+        if let recordingWriter = pipeline.recordingWriter,
+           let recordingQueue = pipeline.recordingQueue {
+            if pipeline.pendingRecordingAppendCount < Self.maximumPendingRecordingAppendCount {
+                pipeline.pendingRecordingAppendCount += 1
+                let recordingSampleBuffer = SendableAudioSampleBuffer(sampleBuffer)
+                recordingQueue.async { [self] in
+                    if let error = recordingWriter.append(recordingSampleBuffer.sampleBuffer) {
+                        pipeline.recordingFailure(error)
+                    }
+                    completeRecordingAppend(for: pipeline)
+                }
+            } else {
+                pipeline.droppedAudioChunkCount += 1
+                pipeline.droppedAudioByteCount += max(0, CMSampleBufferGetTotalSampleSize(sampleBuffer))
+            }
+        }
+        lock.unlock()
+
         pipeline.transcriber.append(sampleBuffer)
         pipeline.openAITranscriber.append(sampleBuffer)
         pipeline.geminiLiveTranslator.append(sampleBuffer)
         pipeline.metaVoiceTranscriber.append(sampleBuffer)
         pipeline.azureMAITranscriber.append(sampleBuffer)
+    }
+
+    func recordingQueueDegradation() -> AudioRecordingQueueDegradation? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let pipeline else { return nil }
+        return recordingQueueDegradationLocked(for: pipeline)
+    }
+
+    private func completeRecordingAppend(for pipeline: Pipeline) {
+        lock.lock()
+        pipeline.pendingRecordingAppendCount = max(0, pipeline.pendingRecordingAppendCount - 1)
+        lock.unlock()
+    }
+
+    private func recordingQueueDegradation(
+        for pipeline: Pipeline
+    ) -> AudioRecordingQueueDegradation? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordingQueueDegradationLocked(for: pipeline)
+    }
+
+    private func recordingQueueDegradationLocked(
+        for pipeline: Pipeline
+    ) -> AudioRecordingQueueDegradation? {
+        guard pipeline.droppedAudioChunkCount > 0 else { return nil }
+        return AudioRecordingQueueDegradation(
+            droppedChunkCount: pipeline.droppedAudioChunkCount,
+            droppedByteCount: pipeline.droppedAudioByteCount,
+            pendingAppendLimit: Self.maximumPendingRecordingAppendCount
+        )
     }
 }
 
@@ -437,6 +659,7 @@ final class TranslationSessionStore {
     var isRunning = false
     var isStarting = false
     var isPaused = false
+    private(set) var isStopping = false
     var isDubbingEnabled = false {
         didSet {
             if !isApplyingVoiceOutputDefault {
@@ -653,10 +876,21 @@ final class TranslationSessionStore {
             refreshModelAvailability()
         }
     }
+    var isMixedLanguageInterpreterInputEnabled = false {
+        didSet {
+            normalizeMixedLanguagePairIfNeeded()
+            resetTranslationCache()
+            resetDubbingProgress()
+            refreshModelAvailability()
+        }
+    }
     var audioInputSource = AudioInputSource.systemAudio {
         didSet { persistSelectedSettings() }
     }
     var selectedMicrophoneInputDeviceID = MicrophoneInputDevice.systemDefaultID {
+        didSet { persistSelectedSettings() }
+    }
+    var isAudioRecordingEnabled = true {
         didSet { persistSelectedSettings() }
     }
     var microphoneInputDevices = MicrophoneDeviceCatalog.availableInputDevices()
@@ -674,6 +908,7 @@ final class TranslationSessionStore {
     var pendingAutoDetectionLanguageChange: AutoDetectionLanguageChangeConfirmation?
     var isFoundationTranscriptCleanupRunning = false
     private(set) var latestAudioLevel: Float?
+    private var realtimeTranscriptionTurnBoundary = RealtimeTranscriptionTurnBoundary()
     var modelAvailabilityByModelID = Dictionary(
         uniqueKeysWithValues: IntelligenceModel.allCases.map {
             ($0.id, ModelAvailability.checking(for: $0))
@@ -688,7 +923,7 @@ final class TranslationSessionStore {
     @ObservationIgnored private var geminiSessionRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var metaVoiceTranscriber = MetaVoiceTranscribeService()
     @ObservationIgnored private var metaSessionRefreshTask: Task<Void, Never>?
-    @ObservationIgnored nonisolated private let audioSamplePipelineRegistry = AudioSamplePipelineRegistry()
+    @ObservationIgnored nonisolated private let audioSamplePipelineRegistry: AudioSamplePipelineRegistry
     @ObservationIgnored nonisolated private let openAITerminalTranscriptMailbox =
         OpenAITerminalTranscriptMailbox()
     private let translator = AppleTranslationService()
@@ -779,8 +1014,8 @@ final class TranslationSessionStore {
     private var appleSpeechSegmentIDByLineID: [UUID: String] = [:]
     private var appleSpeechRevisionByLineID: [UUID: Int] = [:]
     private var appleSmallPartialFlushTask: Task<Void, Never>?
-    private var realtimeTranslationSourceText = ""
-    private var realtimeTranslationOnlyText = ""
+    private var realtimeTranslationSource = RealtimeTranscriptAccumulator()
+    private var realtimeTranslationOutput = RealtimeTranscriptAccumulator()
     private var geminiLiveInputTranscriptText = ""
     private var geminiLiveOutputTranscriptText = ""
     private var metaActiveTurnID: Int32?
@@ -790,6 +1025,7 @@ final class TranslationSessionStore {
     private var activeAutosaveSourceText = ""
     private var activeAutosaveTranslatedText = ""
     private var activeAutosaveBaseFileName: String?
+    private var activeRecordingTranscriptBaseFileName: String?
     private var transcriptCheckpointTask: Task<Void, Never>?
     private let transcriptCheckpointInterval: TimeInterval
     private var isRestoringSelectedSettings = false
@@ -802,8 +1038,14 @@ final class TranslationSessionStore {
     private var activeCaptureStartGeneration: UInt64?
 #if DEBUG
     private var permissionSuspendedStartContinuations: [UInt64: CheckedContinuation<Void, Never>] = [:]
+    private var captureStopHandlerForTesting: (@Sendable () async -> Void)?
 #endif
     private var captureStopTask: Task<Void, Never>?
+    private var recordingFinalizationTask: Task<Void, Never>?
+    private var gptTranscriptionStopTask: Task<Void, Never>?
+    private var gptTranscriptionPauseFlushTask: Task<Void, Never>?
+    private var gptTranscriptionPauseFlushGeneration: UInt64 = 0
+    private var acceptsPausedGPTTranscriptionFlush = false
     private var pipelineLifecycle = PipelineLifecycleState()
     private var activeCaptionerGeneration: UInt64?
     private var dubbingSpeechProgress = DubbingSpeechProgress()
@@ -836,8 +1078,18 @@ final class TranslationSessionStore {
         openAITranscriptionModel == .gptLiveTranscribe
     }
 
+    var isUsingMixedLanguageInterpreterInput: Bool {
+        isMixedLanguageInterpreterInputEnabled
+            && openAITranslationModel.usesRealtimeAudioTranslation
+    }
+
+    private var usesGPTTranscriptionPipeline: Bool {
+        isUsingGPTTranscriptionMode || isUsingMixedLanguageInterpreterInput
+    }
+
     var isUsingOpenAIRealtimeTranslation: Bool {
         openAITranslationModel.usesRealtimeAudioTranslation
+            && !isUsingMixedLanguageInterpreterInput
     }
 
     var isUsingGeminiTranslation: Bool {
@@ -903,7 +1155,8 @@ final class TranslationSessionStore {
         )? = nil,
         settingsDefaults: UserDefaults = .standard,
         transcriptsDirectoryURL: URL? = nil,
-        transcriptCheckpointInterval: TimeInterval = TranslationSessionStore.defaultTranscriptCheckpointInterval
+        transcriptCheckpointInterval: TimeInterval = TranslationSessionStore.defaultTranscriptCheckpointInterval,
+        audioSamplePipelineRegistry: AudioSamplePipelineRegistry = AudioSamplePipelineRegistry()
     ) {
         self.modelAvailabilityProvider = modelAvailabilityProvider
         self.modelAssetDownloader = modelAssetDownloader
@@ -911,6 +1164,7 @@ final class TranslationSessionStore {
         self.settingsDefaults = settingsDefaults
         self.transcriptsDirectoryOverride = transcriptsDirectoryURL
         self.transcriptCheckpointInterval = transcriptCheckpointInterval
+        self.audioSamplePipelineRegistry = audioSamplePipelineRegistry
         restoreSelectedSettings()
         applyTranslatedVoiceVolume()
         syncLiveOutputModeWithLanguagePair()
@@ -985,6 +1239,8 @@ final class TranslationSessionStore {
         captureStartFailureMessage = nil
         captureStartRecoveryAction = nil
         invalidateCaptureStartAttempt()
+        isStopping = false
+        activeRecordingTranscriptBaseFileName = nil
         let configuration = currentStartConfiguration()
         let generation = pipelineLifecycle.beginStart(configuration: configuration)
         activeCaptureStartGeneration = generation
@@ -1003,12 +1259,16 @@ final class TranslationSessionStore {
                     await captureStopTask.value
                     self.captureStopTask = nil
                 }
+                if let recordingFinalizationTask {
+                    await recordingFinalizationTask.value
+                    self.recordingFinalizationTask = nil
+                }
                 try validatePipelineStart(generation: generation, configuration: configuration)
                 if configuration.audioInputSource == .systemAudio {
                     try systemAudioCapture.requestScreenRecordingAccess()
                 }
                 try validatePipelineStart(generation: generation, configuration: configuration)
-                if configuration.isUsingGPTTranscriptionMode {
+                if configuration.usesGPTTranscriptionPipeline {
                     statusMessage = AppText.connectingGPTTranscription
                 } else if configuration.geminiTranslationModel.isEnabled {
                     statusMessage = AppText.connectingGeminiLiveTranslation
@@ -1028,7 +1288,18 @@ final class TranslationSessionStore {
                     openAITranscriber: openAITranscriber,
                     geminiLiveTranslator: geminiLiveTranslator,
                     metaVoiceTranscriber: metaVoiceTranscriber,
-                    azureMAITranscriber: azureMAITranscriber
+                    azureMAITranscriber: azureMAITranscriber,
+                    recordingWriter: isAudioRecordingEnabled
+                        ? AudioRecordingWriter(
+                            directoryURL: transcriptsDirectoryURL,
+                            inputSource: configuration.audioInputSource
+                        )
+                        : nil,
+                    recordingFailure: { [weak self] error in
+                        Task { @MainActor [weak self] in
+                            self?.statusMessage = AppText.audioRecordingFailed(error.localizedDescription)
+                        }
+                    }
                 )
 
                 statusMessage = AppText.startingCapture(for: configuration.audioInputSource)
@@ -1086,16 +1357,23 @@ final class TranslationSessionStore {
     }
 
     func stop() {
+        if let gptTranscriptionStopTask {
+            gptTranscriptionStopTask.cancel()
+            self.gptTranscriptionStopTask = nil
+            cancelGPTTranscriptionPauseFlush()
+            finishPipeline(statusOverride: nil)
+            return
+        }
         guard isRunning || isStarting else { return }
         if isUsingAzureMAI, isRunning {
             guard !isFinishingAzureMAI else { return }
             isFinishingAzureMAI = true
             statusMessage = AzureMAICopy.finishing
-            audioSamplePipelineRegistry.clear()
+            audioSamplePipelineRegistry.setRecordingPaused(true)
             let service = azureMAITranscriber
             azureFinishTask = Task { @MainActor [weak self] in
                 guard let self else { return }
-                await stopCapture()
+                await beginCaptureStop().value
                 await service.finish()
                 guard !Task.isCancelled, service === azureMAITranscriber, isRunning else { return }
                 isFinishingAzureMAI = false
@@ -1105,12 +1383,42 @@ final class TranslationSessionStore {
             }
             return
         }
+        isStopping = true
+        cancelGPTTranscriptionPauseFlush()
         pipelineLifecycle.stop()
+        if isRunning, usesGPTTranscriptionPipeline {
+            statusMessage = AppText.stopping
+            audioSamplePipelineRegistry.setRecordingPaused(true)
+            let captureStopTask = beginCaptureStop()
+            let transcriberToFinish = openAITranscriber
+            gptTranscriptionStopTask = Task { @MainActor [weak self] in
+                await captureStopTask.value
+                guard !Task.isCancelled else { return }
+                let didFinishTranscription = await transcriberToFinish
+                    .finishPendingTranscriptionAudio()
+                guard let self,
+                      !Task.isCancelled,
+                      self.gptTranscriptionStopTask != nil,
+                      self.openAITranscriber === transcriberToFinish
+                else { return }
+                self.gptTranscriptionStopTask = nil
+                self.finishPipeline(
+                    statusOverride: didFinishTranscription
+                        ? nil
+                        : AppText.gptTranscriptionFinalizationTimedOut
+                )
+            }
+            return
+        }
         finishPipeline(statusOverride: nil)
     }
 
     private func finishPipeline(statusOverride: String?) {
         isFinishingAzureMAI = false
+        isStopping = false
+        cancelGPTTranscriptionPauseFlush()
+        gptTranscriptionStopTask?.cancel()
+        gptTranscriptionStopTask = nil
         invalidateCaptureStartAttempt()
         cancelTranslationSessionWarmup()
         autoStartAfterModelAssetDownloadTask?.cancel()
@@ -1125,7 +1433,8 @@ final class TranslationSessionStore {
             && (!visibleTranscript().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !activeAutosaveSourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             )
-        let didSaveTranscript = flushPendingTranscriptSave()
+        let savedTranscriptBaseFileName = flushPendingTranscriptSave()
+        let didSaveTranscript = savedTranscriptBaseFileName != nil
         resetLiveSessionState(clearsVisibleLines: false)
         isPaused = false
         setCaptionersPaused(false)
@@ -1138,18 +1447,28 @@ final class TranslationSessionStore {
         } else if !hadTranscriptToSave {
             statusMessage = AppText.stopped
         }
-        stopCaptioners(openAITranscriberAlreadyStopped: true)
+        let recordingBaseFileName = activeRecordingTranscriptBaseFileName ?? savedTranscriptBaseFileName
+        let recordingFinalization = stopCaptioners(openAITranscriberAlreadyStopped: true)
+        scheduleRecordingFinalization(
+            recordingFinalization,
+            transcriptBaseFileName: recordingBaseFileName
+        )
+        activeRecordingTranscriptBaseFileName = nil
         if didSaveTranscript {
             showToast(AppText.transcriptSavedToast)
         }
 
-        let previousStopTask = captureStopTask
-        captureStopTask = Task { @MainActor in
-            if let previousStopTask {
-                await previousStopTask.value
-            }
-            await stopCapture()
+        _ = beginCaptureStop()
+    }
+
+    private func beginCaptureStop() -> Task<Void, Never> {
+        if let captureStopTask { return captureStopTask }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.stopCapture()
         }
+        captureStopTask = task
+        return task
     }
 
     private func invalidateCaptureStartAttempt() {
@@ -1227,7 +1546,8 @@ final class TranslationSessionStore {
             azureMAIEnabled: isUsingAzureMAI,
             azureSpeechEndpoint: azureSpeechEndpoint,
             usesMetaSpeakerLabels: isMetaSpeakerLabelsEnabled,
-            usesAppleSourceAutoDetection: isUsingAppleSourceAutoDetection
+            usesAppleSourceAutoDetection: isUsingAppleSourceAutoDetection,
+            usesMixedLanguageInterpreterInput: isUsingMixedLanguageInterpreterInput
         )
     }
 
@@ -1320,7 +1640,10 @@ final class TranslationSessionStore {
     }
 
     private var requiredLocalModelForStart: IntelligenceModel? {
-        if openAITranslationModel.usesRealtimeAudioTranslation {
+        if isUsingMixedLanguageInterpreterInput {
+            return .appleOnDevice
+        }
+        if isUsingOpenAIRealtimeTranslation {
             return nil
         }
         if openAITranscriptionModel.isEnabled {
@@ -1375,8 +1698,11 @@ final class TranslationSessionStore {
     }
 
     func pause() {
-        guard isRunning, !isPaused, !isFinishingAzureMAI else { return }
+        guard isRunning, !isPaused, !isFinishingAzureMAI, gptTranscriptionStopTask == nil else { return }
 
+        if usesGPTTranscriptionPipeline {
+            realtimeTranscriptionTurnBoundary.reset()
+        }
         flushPendingRecognizedCaption()
         flushPendingCaptionPresentation()
         transcriptCleanupTask?.cancel()
@@ -1388,10 +1714,14 @@ final class TranslationSessionStore {
         stopSpeaking()
         isPaused = true
         statusMessage = AppText.paused
+        if usesGPTTranscriptionPipeline {
+            beginGPTTranscriptionPauseFlush()
+        }
     }
 
     func resume() {
         guard isRunning, isPaused, !isFinishingAzureMAI else { return }
+        cancelGPTTranscriptionPauseFlush()
         pendingAutoDetectionLanguageChange = nil
 
         setCaptionersPaused(false)
@@ -1407,7 +1737,7 @@ final class TranslationSessionStore {
         let detectedLanguage = pendingAutoDetectionLanguageChange.detectedLanguage
         let bufferedSourceText = pendingAutoDetectionLanguageChange.sourceText
         let bufferedConfidence = pendingAutoDetectionLanguageChange.confidence
-        let didSaveTranscript = flushPendingTranscriptSave()
+        let didSaveTranscript = flushPendingTranscriptSave() != nil
 
         resetLiveSessionState(clearsVisibleLines: true)
         appleAutoDetectionPreferredLanguage = detectedLanguage
@@ -1445,14 +1775,28 @@ final class TranslationSessionStore {
         showToast(AppText.appleAutoLanguageModeUnavailableToast)
     }
 
-    func prepareForTermination() {
+    func prepareForTermination() async {
+        cancelGPTTranscriptionPauseFlush()
         autoStartAfterModelAssetDownloadTask?.cancel()
         cancelTranslationSessionWarmup()
         transcriptCheckpointTask?.cancel()
         transcriptCheckpointTask = nil
         flushPendingRecognizedCaption()
         flushPendingCaptionPresentation()
-        _ = flushPendingTranscriptSave()
+        let savedTranscriptBaseFileName = flushPendingTranscriptSave()
+        if let recordingFinalizationTask {
+            await recordingFinalizationTask.value
+            self.recordingFinalizationTask = nil
+        }
+        let recordingFinalization = stopCaptioners()
+        let recordingResult = await recordingFinalization.value
+        associateRecording(
+            recordingResult.fileURL,
+            withTranscriptBaseFileName: activeRecordingTranscriptBaseFileName ?? savedTranscriptBaseFileName
+        )
+        reportRecordingDegradation(recordingResult.degradation)
+        activeRecordingTranscriptBaseFileName = nil
+        await beginCaptureStop().value
     }
 
     func openPrivacySettings() {
@@ -1579,6 +1923,10 @@ final class TranslationSessionStore {
             sourceLanguage = language
             return
         }
+        guard !isUsingMixedLanguageInterpreterInput || language != targetLanguage else {
+            showToast(AppText.sameLanguageTranslationUnavailable)
+            return
+        }
 
         let previousSourceLanguage = sourceLanguage
         let nextTargetLanguage = language == targetLanguage
@@ -1641,6 +1989,7 @@ final class TranslationSessionStore {
         applyProviderVoiceOutputDefault()
         restoreFloatingCaptionDisplayModeAfterTranscribeOnly()
         usePreferredLanguageForOpenAIOutput()
+        normalizeMixedLanguagePairIfNeeded()
     }
 
     func useGPTTranscriptionMode() {
@@ -1786,6 +2135,20 @@ final class TranslationSessionStore {
             useTranscribeOnlyMode()
             return
         }
+    }
+
+    private func normalizeMixedLanguagePairIfNeeded() {
+        guard isUsingMixedLanguageInterpreterInput,
+              sourceLanguage == targetLanguage
+        else { return }
+
+        updateLanguagePair(
+            source: fallbackTargetLanguage(
+                excluding: targetLanguage,
+                preferred: sourceLanguage
+            ),
+            target: targetLanguage
+        )
     }
 
     private func updateLanguagePair(source: LanguageOption, target: LanguageOption) {
@@ -2058,7 +2421,9 @@ final class TranslationSessionStore {
         guard let transcript = savedTranscripts.first(where: { $0.id == id }) else { return }
 
         selectedSavedTranscriptID = id
-        savedDraftSourceText = loadTranscriptText(fileName: transcript.sourceFileName) ?? transcript.sourceText
+        savedDraftSourceText = transcript.sourceFileName
+            .flatMap(loadTranscriptText(fileName:))
+            ?? transcript.sourceText
         if let translationFileName = transcript.translationFileName,
            let translatedText = loadTranscriptText(fileName: translationFileName) {
             savedDraftTranslationText = translatedText
@@ -2068,7 +2433,9 @@ final class TranslationSessionStore {
     }
 
     func saveSelectedTranscriptEdits() {
-        guard let selectedTranscript = selectedSavedTranscript else { return }
+        guard let selectedTranscript = selectedSavedTranscript,
+              let sourceFileName = selectedTranscript.sourceFileName
+        else { return }
 
         let sourceText = savedDraftSourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sourceText.isEmpty else { return }
@@ -2076,13 +2443,13 @@ final class TranslationSessionStore {
         if selectedTranscript.isOriginalAndTranslation,
            let translationFileName = selectedTranscript.translationFileName {
             let translatedText = savedDraftTranslationText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard writeTranscriptText(sourceText, fileName: selectedTranscript.sourceFileName),
+            guard writeTranscriptText(sourceText, fileName: sourceFileName),
                   writeTranscriptText(translatedText, fileName: translationFileName)
             else {
                 return
             }
         } else {
-            guard writeTranscriptText(sourceText, fileName: selectedTranscript.sourceFileName) else { return }
+            guard writeTranscriptText(sourceText, fileName: sourceFileName) else { return }
         }
 
         let selectedID = selectedTranscript.id
@@ -2092,7 +2459,8 @@ final class TranslationSessionStore {
 
     func polishSelectedTranscriptDraftWithFoundationModel() {
         guard !isFoundationTranscriptCleanupRunning,
-              let selectedTranscript = selectedSavedTranscript
+              let selectedTranscript = selectedSavedTranscript,
+              !selectedTranscript.isAudioOnly
         else {
             return
         }
@@ -2138,10 +2506,22 @@ final class TranslationSessionStore {
     func deleteSelectedTranscript() {
         guard let selectedTranscript = selectedSavedTranscript else { return }
 
+        if let recordingURL = associatedRecordingURL(for: selectedTranscript),
+           isActiveRecordingFile(recordingURL) {
+            showToast(AppText.activeRecordingCannotBeDeleted)
+            loadSavedTranscripts()
+            return
+        }
+
         savedTranscripts.removeAll { $0.id == selectedTranscript.id }
-        try? FileManager.default.removeItem(at: transcriptURL(fileName: selectedTranscript.sourceFileName))
+        if let sourceFileName = selectedTranscript.sourceFileName {
+            try? FileManager.default.removeItem(at: transcriptURL(fileName: sourceFileName))
+        }
         if let translationFileName = selectedTranscript.translationFileName {
             try? FileManager.default.removeItem(at: transcriptURL(fileName: translationFileName))
+        }
+        if let recordingURL = associatedRecordingURL(for: selectedTranscript) {
+            try? FileManager.default.removeItem(at: recordingURL)
         }
         self.selectedSavedTranscriptID = nil
         savedDraftSourceText = ""
@@ -2159,7 +2539,9 @@ final class TranslationSessionStore {
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             )
-            for fileURL in fileURLs where fileURL.pathExtension == "txt" {
+            for fileURL in fileURLs
+            where ["txt", "m4a"].contains(fileURL.pathExtension.lowercased())
+                && !isActiveRecordingFile(fileURL) {
                 try FileManager.default.removeItem(at: fileURL)
             }
             savedTranscripts.removeAll()
@@ -2290,10 +2672,17 @@ final class TranslationSessionStore {
         }
         activeCaptionerGeneration = generation
 
-        if configuration.isTranscribeOnlyMode, configuration.openAITranscriptionModel.isEnabled {
+        if configuration.usesMixedLanguageInterpreterInput {
+            try await openAITranscriber.start(
+                languages: [configuration.sourceLanguage, configuration.targetLanguage],
+                model: .gptLiveTranscribe,
+                audioInputSource: configuration.audioInputSource
+            )
+        } else if configuration.isTranscribeOnlyMode, configuration.openAITranscriptionModel.isEnabled {
             try await openAITranscriber.start(
                 language: configuration.sourceLanguage,
-                model: configuration.openAITranscriptionModel
+                model: configuration.openAITranscriptionModel,
+                audioInputSource: configuration.audioInputSource
             )
         } else if configuration.geminiTranslationModel.isEnabled {
             try await geminiLiveTranslator.start(
@@ -2333,12 +2722,14 @@ final class TranslationSessionStore {
         } else if configuration.openAITranslationModel.usesRealtimeAudioTranslation {
             try await openAITranscriber.startRealtimeTranslationOnly(
                 language: configuration.targetLanguage,
-                model: configuration.openAITranslationModel
+                model: configuration.openAITranslationModel,
+                audioInputSource: configuration.audioInputSource
             )
         } else if configuration.openAITranscriptionModel.isEnabled {
             try await openAITranscriber.start(
                 language: configuration.sourceLanguage,
-                model: configuration.openAITranscriptionModel
+                model: configuration.openAITranscriptionModel,
+                audioInputSource: configuration.audioInputSource
             )
         }
     }
@@ -2409,12 +2800,15 @@ final class TranslationSessionStore {
         )
     }
 
-    private func stopCaptioners(openAITranscriberAlreadyStopped: Bool = false) {
+    @discardableResult
+    private func stopCaptioners(
+        openAITranscriberAlreadyStopped: Bool = false
+    ) -> Task<AudioRecordingFinalization, Never> {
+        let recordingFinalization = audioSamplePipelineRegistry.beginClear()
         geminiSessionRefreshTask?.cancel()
         geminiSessionRefreshTask = nil
         metaSessionRefreshTask?.cancel()
         metaSessionRefreshTask = nil
-        audioSamplePipelineRegistry.clear()
         activeCaptionerGeneration = nil
         openAITranscriber.onAudioTransportDegraded = nil
         geminiLiveTranslator.onAudioTransportDegraded = nil
@@ -2432,6 +2826,7 @@ final class TranslationSessionStore {
         geminiLiveTranslator.stop()
         metaVoiceTranscriber.stop()
         azureMAITranscriber.stop()
+        return recordingFinalization
     }
 
     private func scheduleGeminiSessionRefresh(
@@ -2592,6 +2987,32 @@ final class TranslationSessionStore {
         )
     }
 
+    private func scheduleRecordingFinalization(
+        _ finalization: Task<AudioRecordingFinalization, Never>,
+        transcriptBaseFileName: String?
+    ) {
+        let previousFinalization = recordingFinalizationTask
+        recordingFinalizationTask = Task { @MainActor [weak self] in
+            if let previousFinalization {
+                await previousFinalization.value
+            }
+            let result = await finalization.value
+            guard let self else { return }
+            self.associateRecording(
+                result.fileURL,
+                withTranscriptBaseFileName: transcriptBaseFileName
+            )
+            self.reportRecordingDegradation(result.degradation)
+        }
+    }
+
+    private func reportRecordingDegradation(
+        _ degradation: AudioRecordingQueueDegradation?
+    ) {
+        guard let degradation else { return }
+        statusMessage = AppText.audioRecordingDroppedChunks(degradation.droppedChunkCount)
+    }
+
     private func flushOpenAITerminalTranscriptMailbox() {
         openAITerminalTranscriptMailbox.drain().forEach { transcript in
             guard transcript.transcriber === openAITranscriber,
@@ -2628,6 +3049,7 @@ final class TranslationSessionStore {
     }
 
     private func setCaptionersPaused(_ isPaused: Bool) {
+        audioSamplePipelineRegistry.setRecordingPaused(isPaused)
         transcriber.setPaused(isPaused)
         openAITranscriber.setPaused(isPaused)
         geminiLiveTranslator.setPaused(isPaused)
@@ -2635,10 +3057,38 @@ final class TranslationSessionStore {
         azureMAITranscriber.setPaused(isPaused)
     }
 
+    private func beginGPTTranscriptionPauseFlush() {
+        cancelGPTTranscriptionPauseFlush()
+        acceptsPausedGPTTranscriptionFlush = true
+        let generation = gptTranscriptionPauseFlushGeneration
+        let transcriberToFinish = openAITranscriber
+
+        gptTranscriptionPauseFlushTask = Task { @MainActor [weak self] in
+            _ = await transcriberToFinish.finishPendingTranscriptionAudio()
+            guard let self,
+                  self.gptTranscriptionPauseFlushGeneration == generation,
+                  self.openAITranscriber === transcriberToFinish,
+                  self.isRunning,
+                  self.isPaused
+            else { return }
+            self.flushOpenAITerminalTranscriptMailbox()
+            self.acceptsPausedGPTTranscriptionFlush = false
+            self.gptTranscriptionPauseFlushTask = nil
+        }
+    }
+
+    private func cancelGPTTranscriptionPauseFlush() {
+        gptTranscriptionPauseFlushGeneration &+= 1
+        gptTranscriptionPauseFlushTask?.cancel()
+        gptTranscriptionPauseFlushTask = nil
+        acceptsPausedGPTTranscriptionFlush = false
+    }
+
     private func resetLiveSessionState(clearsVisibleLines: Bool) {
         if clearsVisibleLines { azureSavedTranscriptText = "" }
         audioSampleCount = 0
         latestAudioLevel = nil
+        realtimeTranscriptionTurnBoundary.reset()
         lastRecognizedText = ""
         lastRecognizedWasFinal = false
         currentLineID = nil
@@ -2695,8 +3145,8 @@ final class TranslationSessionStore {
             clearPendingTranslationPlaceholders(message: AppText.translationCancelled)
         }
         resetTranslationCache()
-        realtimeTranslationSourceText = ""
-        realtimeTranslationOnlyText = ""
+        realtimeTranslationSource.reset()
+        realtimeTranslationOutput.reset()
         geminiLiveInputTranscriptText = ""
         geminiLiveOutputTranscriptText = ""
         metaActiveTurnID = nil
@@ -2747,7 +3197,7 @@ final class TranslationSessionStore {
 
     private func warmTranslationSession() {
         cancelTranslationSessionWarmup()
-        guard !openAITranslationModel.isEnabled, !geminiTranslationModel.isEnabled else { return }
+        guard !isUsingOpenAIRealtimeTranslation, !geminiTranslationModel.isEnabled else { return }
 
         let warmSourceLanguage = sourceLanguage
         let warmTargetLanguage = targetLanguage
@@ -2931,6 +3381,9 @@ final class TranslationSessionStore {
         if let deviceID = defaults.string(forKey: SettingsKey.selectedMicrophoneInputDeviceID) {
             selectedMicrophoneInputDeviceID = deviceID
         }
+        if defaults.object(forKey: SettingsKey.isAudioRecordingEnabled) != nil {
+            isAudioRecordingEnabled = defaults.bool(forKey: SettingsKey.isAudioRecordingEnabled)
+        }
         isAppleSourceAutoDetectionEnabled = isAppleSourceAutoDetectionAvailable
             && defaults.bool(forKey: SettingsKey.isAppleSourceAutoDetectionEnabled)
         refreshMicrophoneInputDevices()
@@ -3016,10 +3469,17 @@ final class TranslationSessionStore {
         defaults.set(sessionDurationMode.id, forKey: SettingsKey.sessionDurationMode)
         defaults.set(audioInputSource.id, forKey: SettingsKey.audioInputSource)
         defaults.set(selectedMicrophoneInputDeviceID, forKey: SettingsKey.selectedMicrophoneInputDeviceID)
+        defaults.set(isAudioRecordingEnabled, forKey: SettingsKey.isAudioRecordingEnabled)
         defaults.set(isAppleSourceAutoDetectionEnabled, forKey: SettingsKey.isAppleSourceAutoDetectionEnabled)
     }
 
     private func stopCapture() async {
+        #if DEBUG
+        if let captureStopHandlerForTesting {
+            await captureStopHandlerForTesting()
+            return
+        }
+        #endif
         await systemAudioCapture.stop()
         await microphoneAudioCapture.stop()
     }
@@ -3074,7 +3534,23 @@ final class TranslationSessionStore {
                         updatedAt: values?.contentModificationDate ?? Date.distantPast
                     )
                 }
-            savedTranscripts = groupedSavedTranscripts(from: transcriptFiles)
+            let recordingFiles = fileURLs
+                .filter {
+                    $0.pathExtension.lowercased() == "m4a"
+                        && !isActiveRecordingFile($0)
+                }
+                .map { fileURL -> SavedTranscriptFile in
+                    let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey])
+                    return SavedTranscriptFile(
+                        fileName: fileURL.lastPathComponent,
+                        previewText: "",
+                        updatedAt: values?.contentModificationDate ?? Date.distantPast
+                    )
+                }
+            savedTranscripts = savedTranscripts(
+                from: transcriptFiles,
+                recordings: recordingFiles
+            )
             sortSavedTranscripts()
         } catch {
             savedTranscripts = []
@@ -3154,6 +3630,33 @@ final class TranslationSessionStore {
         return standaloneTranscripts
     }
 
+    private func savedTranscripts(
+        from transcriptFiles: [SavedTranscriptFile],
+        recordings: [SavedTranscriptFile]
+    ) -> [SavedTranscript] {
+        var transcripts = groupedSavedTranscripts(from: transcriptFiles)
+        let recordingByName = Dictionary(uniqueKeysWithValues: recordings.map { ($0.fileName, $0) })
+        var associatedRecordingNames = Set<String>()
+
+        for index in transcripts.indices {
+            guard let sourceFileName = transcripts[index].sourceFileName else { continue }
+            let baseFileName = transcriptVariantInfo(sourceFileName)?.baseFileName ?? sourceFileName
+            let recordingName = recordingFileName(forTranscriptBaseFileName: baseFileName)
+            guard recordingByName[recordingName] != nil else { continue }
+            transcripts[index].recordingFileName = recordingName
+            associatedRecordingNames.insert(recordingName)
+        }
+
+        transcripts.append(contentsOf: recordings.compactMap { recording in
+            guard !associatedRecordingNames.contains(recording.fileName) else { return nil }
+            return SavedTranscript(
+                recordingFileName: recording.fileName,
+                updatedAt: recording.updatedAt
+            )
+        })
+        return transcripts
+    }
+
     private func stageTranscriptForSave(_ sourceText: String, translatedText: String? = nil) {
         guard isTranscriptPersistenceEnabled else { return }
 
@@ -3188,22 +3691,20 @@ final class TranslationSessionStore {
 
     @discardableResult
     private func checkpointPendingTranscriptSave() -> Bool {
-        guard isTranscriptPersistenceEnabled else { return false }
-        return persistPendingTranscriptSave(clearsStagedText: false, reloadsLibrary: false)
+        persistPendingTranscriptSave(clearsStagedText: false, reloadsLibrary: false) != nil
     }
 
     @discardableResult
-    private func flushPendingTranscriptSave() -> Bool {
-        guard isTranscriptPersistenceEnabled else { return false }
-        return persistPendingTranscriptSave(clearsStagedText: true, reloadsLibrary: true)
+    private func flushPendingTranscriptSave() -> String? {
+        persistPendingTranscriptSave(clearsStagedText: true, reloadsLibrary: true)
     }
 
     @discardableResult
     private func persistPendingTranscriptSave(
         clearsStagedText: Bool,
         reloadsLibrary: Bool
-    ) -> Bool {
-        guard isTranscriptPersistenceEnabled else { return false }
+    ) -> String? {
+        guard isTranscriptPersistenceEnabled else { return nil }
 
         let currentSourceText = usesAppleCaptionRollover && lines.count > 1
             ? appleSavedSourceTranscriptText
@@ -3219,7 +3720,7 @@ final class TranslationSessionStore {
         }
 
         let sourceText = activeAutosaveSourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sourceText.isEmpty else { return false }
+        guard !sourceText.isEmpty else { return nil }
 
         let updatedAt = Date()
         let baseFileName = activeAutosaveBaseFileName
@@ -3233,9 +3734,10 @@ final class TranslationSessionStore {
 
         for savedFile in savedFiles {
             guard writeTranscriptText(savedFile.text, fileName: savedFile.fileName) else {
-                return false
+                return nil
             }
         }
+        activeRecordingTranscriptBaseFileName = activeRecordingTranscriptBaseFileName ?? baseFileName
 
         if clearsStagedText {
             activeAutosaveSourceText = ""
@@ -3245,7 +3747,7 @@ final class TranslationSessionStore {
         if reloadsLibrary {
             loadSavedTranscripts()
         }
-        return true
+        return baseFileName
     }
 
     private var appleSavedSourceTranscriptText: String {
@@ -3342,6 +3844,52 @@ final class TranslationSessionStore {
         transcriptsDirectoryURL.appendingPathComponent(fileName)
     }
 
+    private func associatedRecordingURL(for transcript: SavedTranscript) -> URL? {
+        if let recordingFileName = transcript.recordingFileName {
+            return transcriptURL(fileName: recordingFileName)
+        }
+        guard let sourceFileName = transcript.sourceFileName else { return nil }
+        let baseFileName = transcriptVariantInfo(sourceFileName)?.baseFileName ?? sourceFileName
+        return transcriptURL(fileName: recordingFileName(forTranscriptBaseFileName: baseFileName))
+    }
+
+    private func isActiveRecordingFile(_ fileURL: URL) -> Bool {
+        guard let activeURL = audioSamplePipelineRegistry.currentRecordingFileURL() else { return false }
+        return fileURL.standardizedFileURL == activeURL.standardizedFileURL
+    }
+
+    private func recordingFileName(forTranscriptBaseFileName fileName: String) -> String {
+        let stem = fileName.hasSuffix(".txt") ? String(fileName.dropLast(4)) : fileName
+        return "\(stem).m4a"
+    }
+
+    private func associateRecording(_ recordingURL: URL?, withTranscriptBaseFileName fileName: String?) {
+        guard let recordingURL else { return }
+        guard let fileName else {
+            loadSavedTranscripts()
+            return
+        }
+
+        let destinationURL = transcriptURL(
+            fileName: recordingFileName(forTranscriptBaseFileName: fileName)
+        )
+        guard recordingURL.standardizedFileURL != destinationURL.standardizedFileURL else {
+            loadSavedTranscripts()
+            return
+        }
+
+        do {
+            try FileManager.default.moveItem(at: recordingURL, to: destinationURL)
+        } catch {
+            if FileManager.default.fileExists(atPath: recordingURL.path) {
+                statusMessage = AppText.audioRecordingSavedSeparately(recordingURL.lastPathComponent)
+            } else {
+                statusMessage = AppText.audioRecordingFailed(error.localizedDescription)
+            }
+        }
+        loadSavedTranscripts()
+    }
+
     private func transcriptVariantFileName(_ fileName: String, suffix: String) -> String {
         let stem = fileName.hasSuffix(".txt") ? String(fileName.dropLast(4)) : fileName
         return "\(stem)_\(suffix).txt"
@@ -3391,7 +3939,8 @@ final class TranslationSessionStore {
             transcriptVariantFileName(fileName, suffix: "original"),
             transcriptVariantFileName(fileName, suffix: "translation"),
             legacyTranscriptVariantFileName(fileName, suffix: "original"),
-            legacyTranscriptVariantFileName(fileName, suffix: "translation")
+            legacyTranscriptVariantFileName(fileName, suffix: "translation"),
+            recordingFileName(forTranscriptBaseFileName: fileName)
         ]
         return fileNames.contains { FileManager.default.fileExists(atPath: transcriptURL(fileName: $0).path) }
     }
@@ -3426,7 +3975,7 @@ final class TranslationSessionStore {
         isFinal: Bool,
         metadata: AppleSpeechRecognitionMetadata? = nil
     ) {
-        guard isRunning, !isPaused else { return }
+        guard isRunning, !isPaused || acceptsPausedGPTTranscriptionFlush else { return }
         guard sourceText != lastRecognizedText || isFinal != lastRecognizedWasFinal || metadata != nil else { return }
         guard appleRecognitionTranslationPolicy.acceptsRecognition(
             metadata,
@@ -3564,19 +4113,33 @@ final class TranslationSessionStore {
         if isFinal {
             flushPendingRecognizedCaption()
         }
+        let routedSourceText: String
+        if isUsingMixedLanguageInterpreterInput {
+            guard let sourceText = MixedLanguageUtteranceRouter.sourceText(
+                from: sourceText,
+                sourceLanguageID: sourceLanguage.id,
+                targetLanguageID: targetLanguage.id
+            ) else { return }
+            routedSourceText = sourceText
+        } else {
+            routedSourceText = sourceText
+        }
+        let effectiveLanguage = isUsingMixedLanguageInterpreterInput
+            ? sourceLanguage
+            : recognizedLanguage
 
         if !isLargeTranscriptRecognitionCoalescingActive {
             let currentSourceLength = lines.last?.sourceText.utf16.count ?? 0
             isLargeTranscriptRecognitionCoalescingActive = usesLongSessionMode
                 || currentSourceLength >= Self.largeTranscriptPresentationCharacterLimit
-                || sourceText.utf16.count >= Self.largeTranscriptPresentationCharacterLimit
+                || routedSourceText.utf16.count >= Self.largeTranscriptPresentationCharacterLimit
         }
 
         guard isLargeTranscriptRecognitionCoalescingActive, !isFinal else {
             lastRecognizedCaptionDeliveryAt = Date()
             appendCaption(
-                sourceText: sourceText,
-                recognizedLanguage: recognizedLanguage,
+                sourceText: routedSourceText,
+                recognizedLanguage: effectiveLanguage,
                 confidence: confidence,
                 isFinal: isFinal,
                 metadata: metadata
@@ -3585,8 +4148,8 @@ final class TranslationSessionStore {
         }
 
         pendingRecognizedCaption = PendingRecognizedCaption(
-            sourceText: sourceText,
-            recognizedLanguage: recognizedLanguage,
+            sourceText: routedSourceText,
+            recognizedLanguage: effectiveLanguage,
             confidence: confidence,
             metadata: metadata
         )
@@ -4858,7 +5421,7 @@ final class TranslationSessionStore {
     }
 
     private var translationEngineCacheID: String {
-        if openAITranslationModel.isEnabled {
+        if openAITranslationModel.isEnabled, !isUsingMixedLanguageInterpreterInput {
             return "openai:\(openAITranslationModel.id)"
         }
         return "apple:\(selectedModel.id)"
@@ -4877,12 +5440,9 @@ final class TranslationSessionStore {
         guard isUsingOpenAIRealtimeTranslation else { return }
 
         guard text.rangeOfCharacter(from: .whitespacesAndNewlines.inverted) != nil
-            || !realtimeTranslationSourceText.isEmpty else { return }
+            || !realtimeTranslationSource.text.isEmpty else { return }
 
-        realtimeTranslationSourceText = accumulatedRealtimeText(
-            current: realtimeTranslationSourceText,
-            next: text
-        )
+        realtimeTranslationSource.append(text, languageID: sourceLanguage.id)
         refreshOpenAIRealtimeTranslationLine()
     }
 
@@ -4891,18 +5451,15 @@ final class TranslationSessionStore {
         guard isUsingOpenAIRealtimeTranslation else { return }
 
         guard text.rangeOfCharacter(from: .whitespacesAndNewlines.inverted) != nil
-            || !realtimeTranslationOnlyText.isEmpty else { return }
+            || !realtimeTranslationOutput.text.isEmpty else { return }
 
-        realtimeTranslationOnlyText = accumulatedRealtimeText(
-            current: realtimeTranslationOnlyText,
-            next: text
-        )
+        realtimeTranslationOutput.append(text, languageID: targetLanguage.id)
         refreshOpenAIRealtimeTranslationLine()
     }
 
     private func refreshOpenAIRealtimeTranslationLine() {
-        let inputText = realtimeTranslationSourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let translatedText = realtimeTranslationOnlyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inputText = realtimeTranslationSource.text
+        let translatedText = realtimeTranslationOutput.text
         guard !inputText.isEmpty || !translatedText.isEmpty else { return }
 
         lastRecognizedText = inputText.isEmpty ? translatedText : inputText
@@ -5167,6 +5724,9 @@ final class TranslationSessionStore {
         }
     }
 
+    // Gemini Live sends each transcription message independently and does not guarantee
+    // ordering, so the segment-aware accumulator used for the GPT paths does not apply here.
+    // See decisions.md, 2026-08-16.
     private func accumulatedRealtimeText(current: String, next: String) -> String {
         if next.hasPrefix(current) {
             return next
@@ -5380,7 +5940,7 @@ final class TranslationSessionStore {
         force: Bool = false,
         appleIdentity: AppleTranslationRequestIdentity? = nil
     ) {
-        guard !openAITranslationModel.usesRealtimeAudioTranslation else { return }
+        guard !isUsingOpenAIRealtimeTranslation else { return }
         guard !isUsingGeminiTranslation else { return }
 
         guard !isTranscribeOnlyMode else {
@@ -6111,6 +6671,23 @@ final class TranslationSessionStore {
         return (generation, transcriber, openAITranscriber)
     }
 
+    func setCaptureStopHandlerForTesting(
+        _ handler: (@Sendable () async -> Void)?
+    ) {
+        captureStopHandlerForTesting = handler
+    }
+
+    var acceptsPausedGPTTranscriptionFlushForTesting: Bool {
+        acceptsPausedGPTTranscriptionFlush
+    }
+
+    func associateRecordingForTesting(
+        _ recordingURL: URL,
+        withTranscriptBaseFileName fileName: String
+    ) {
+        associateRecording(recordingURL, withTranscriptBaseFileName: fileName)
+    }
+
     func warmTranslationSessionForTesting() {
         warmTranslationSession()
     }
@@ -6170,6 +6747,7 @@ extension TranslationSessionStore: SystemAudioCaptureDelegate {
             if isRunning, lines.isEmpty {
                 statusMessage = audioStatusMessage(sampleCount: count, level: level)
             }
+            commitRealtimeTranscriptionAtTurnBoundary(level: level)
             if let level, level < -50 {
                 scheduleTranscriptCleanup()
             }
@@ -6217,6 +6795,14 @@ extension TranslationSessionStore: SystemAudioCaptureDelegate {
             source: audioInputSource
         )
     }
+
+    private func commitRealtimeTranscriptionAtTurnBoundary(level: Float?) {
+        guard isRunning,
+              usesGPTTranscriptionPipeline,
+              realtimeTranscriptionTurnBoundary.observe(level: level)
+        else { return }
+        openAITranscriber.commitTranscriptionAudio()
+    }
 }
 
 extension TranslationSessionStore: MicrophoneAudioCaptureDelegate {
@@ -6249,6 +6835,7 @@ extension TranslationSessionStore: MicrophoneAudioCaptureDelegate {
             if isRunning, lines.isEmpty {
                 statusMessage = audioStatusMessage(sampleCount: count, level: level)
             }
+            commitRealtimeTranscriptionAtTurnBoundary(level: level)
             if let level, level < -50 {
                 scheduleTranscriptCleanup()
             }
@@ -6281,6 +6868,9 @@ extension TranslationSessionStore: LiveSpeechTranscriberDelegate {
             guard activeGeneration(for: transcriber, requiresRunning: true) != nil else {
                 return
             }
+            // Mixed-language routing needs the completed utterance. Its terminal
+            // transcript arrives through openAITerminalTranscriptMailbox.
+            guard !isUsingMixedLanguageInterpreterInput else { return }
             enqueueRecognizedCaption(
                 sourceText: text,
                 recognizedLanguage: language,
@@ -6356,7 +6946,7 @@ extension TranslationSessionStore: LiveSpeechTranscriberDelegate {
                   isRunning,
                   !isPaused,
                   isDubbingEnabled,
-                  openAITranslationModel.usesRealtimeAudioTranslation
+                  isUsingOpenAIRealtimeTranslation
             else {
                 return
             }

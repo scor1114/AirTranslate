@@ -2,6 +2,8 @@
 
 # AirTranslate
 
+> **Patched fork: upstream 1.8.0, build 180.1.** GPT fixes, optional mixed-language input, and audio recording are restored; see [fork review and build instructions](FORK.md). Audio recording defaults to **on** in this fork; text-file saving remains **off** by default. The download links below refer to upstream releases and do not contain these fork changes.
+
 Live system-audio transcription and translation for macOS.
 
 <p align="center">
